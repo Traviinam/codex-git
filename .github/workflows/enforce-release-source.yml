@@ -1,0 +1,39 @@
+name: Enforce release pull request source
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - edited
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: release-source-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  reject-non-dev-source:
+    if: >-
+      github.event.pull_request.head.ref != 'dev' ||
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain and close the invalid release pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          message="Pull requests targeting \`main\` must come from this repository's \`dev\` branch. This pull request comes from \`${HEAD_REPO}:${HEAD_REF}\`, so it has been closed. Retarget ordinary work to \`dev\`; use \`dev → main\` only for a release."
+          gh pr comment "$PR_NUMBER" --repo "$GH_REPO" --body "$message"
+          gh pr close "$PR_NUMBER" --repo "$GH_REPO"
