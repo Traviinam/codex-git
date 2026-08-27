@@ -43,3 +43,4 @@ packages/host-adapter          Host Adapter boundary
 packages/host-adapter/*        Codex CDP and standalone adapter placeholders
 tests/                         Reserved contract, integration, and end-to-end layers
 ```
+# codex-git
