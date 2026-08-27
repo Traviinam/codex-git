@@ -1,0 +1,9 @@
+{
+  "name": "@codex-git/host-adapter-standalone",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@codex-git/host-adapter": "*"
+  }
+}

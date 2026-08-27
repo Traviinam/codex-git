@@ -1,0 +1,10 @@
+{
+  "name": "@codex-git/repository-engine",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@codex-git/protocol": "*"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "@codex-git/host-adapter",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "types": "./src/index.ts"
+}
