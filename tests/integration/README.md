@@ -1,3 +1,3 @@
 # Integration tests
 
-Real temporary Git repository integration tests will live here once Git behavior is implemented.
+System-boundary integration tests live here. The shared temporary Git Repository fixture is established by the bootstrap; product Git behavior joins this layer with the Repository Engine issues.

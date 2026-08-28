@@ -3,6 +3,8 @@ import reactHooks from 'eslint-plugin-react-hooks';
 import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
 
+import { uiNodeImportGuard } from './apps/ui/lint-rules.js';
+
 export default tseslint.config(
   {
     ignores: ['coverage/', 'dist/', 'node_modules/'],
@@ -24,4 +26,5 @@ export default tseslint.config(
       ],
     },
   },
+  uiNodeImportGuard,
 );

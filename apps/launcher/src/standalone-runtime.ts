@@ -1,0 +1,123 @@
+import type { Server } from 'node:http';
+import { fileURLToPath } from 'node:url';
+
+import { createAppServer } from '@codex-git/server';
+import { StandaloneHostAdapter } from '@codex-git/host-adapter-standalone';
+import { createServer as createViteServer, type ViteDevServer } from 'vite';
+
+const loopbackHost = '127.0.0.1';
+const uiConfigPath = fileURLToPath(
+  new URL('../../ui/vite.config.ts', import.meta.url),
+);
+
+export interface StandaloneRuntimeOptions {
+  readonly healthPort?: number;
+  readonly surfacePort?: number;
+}
+
+export interface StandaloneRuntime {
+  readonly healthUrl: URL;
+  readonly surfaceUrl: URL;
+  close(): Promise<void>;
+}
+
+export async function startStandaloneRuntime(
+  options: StandaloneRuntimeOptions = {},
+): Promise<StandaloneRuntime> {
+  const healthServer = createAppServer();
+  let surfaceServer: ViteDevServer | undefined;
+  let hostConnection: Awaited<
+    ReturnType<StandaloneHostAdapter['attach']>
+  > | null = null;
+
+  async function closeResources(): Promise<void> {
+    await Promise.all([
+      hostConnection?.dispose(),
+      surfaceServer?.close(),
+      closeServer(healthServer),
+    ]);
+  }
+
+  try {
+    await listen(healthServer, options.healthPort ?? 0);
+    const healthUrl = serverUrl(healthServer, '/health');
+
+    surfaceServer = await createViteServer({
+      configFile: uiConfigPath,
+      server: {
+        host: loopbackHost,
+        port: options.surfacePort ?? 5173,
+        strictPort: true,
+      },
+    });
+    await surfaceServer.listen();
+
+    const surfaceUrl = serverUrl(surfaceServer.httpServer, '/');
+    hostConnection = await new StandaloneHostAdapter().attach({
+      title: 'Codex Git',
+      url: surfaceUrl,
+    });
+
+    let closed = false;
+
+    return {
+      healthUrl,
+      surfaceUrl,
+      async close() {
+        if (closed) {
+          return;
+        }
+
+        closed = true;
+        await closeResources();
+      },
+    };
+  } catch (error) {
+    await closeResources();
+    throw error;
+  }
+}
+
+function listen(server: Server, port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const handleError = (error: Error) => {
+      server.off('listening', handleListening);
+      reject(error);
+    };
+    const handleListening = () => {
+      server.off('error', handleError);
+      resolve();
+    };
+
+    server.once('error', handleError);
+    server.once('listening', handleListening);
+    server.listen(port, loopbackHost);
+  });
+}
+
+function serverUrl(
+  server: Pick<Server, 'address'> | null,
+  pathname: string,
+): URL {
+  const address = server?.address();
+
+  if (
+    address === undefined ||
+    address === null ||
+    typeof address === 'string'
+  ) {
+    throw new Error('Standalone runtime server has no TCP address');
+  }
+
+  return new URL(pathname, `http://${loopbackHost}:${address.port}`);
+}
+
+function closeServer(server: Server): Promise<void> {
+  if (!server.listening) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}

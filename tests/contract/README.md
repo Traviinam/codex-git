@@ -1,3 +1,3 @@
 # Contract tests
 
-Repository Engine and protocol contract tests will live here once their behavior is implemented.
+Public module contracts are verified here. The bootstrap covers the standalone Host Adapter; Repository Engine and protocol contracts join this layer with their implementation issues.
