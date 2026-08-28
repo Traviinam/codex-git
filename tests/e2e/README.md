@@ -1,3 +1,3 @@
 # End-to-end tests
 
-Standalone and Codex-hosted end-to-end tests will live here once Host Adapters are implemented.
+Complete runtime tests live here. The bootstrap exercises the standalone launcher, health endpoint, Host Adapter, and placeholder Git Surface; Codex-hosted coverage joins this layer with its Host Adapter issue.

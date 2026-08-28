@@ -20,11 +20,13 @@ Codex Git is a planned local Git surface for Codex Desktop. This repository curr
 ## Commands
 
 ```sh
-npm install
+npm ci
 npm run dev
 ```
 
-The placeholder UI is available at the URL printed by Vite. The server scaffold can be started separately:
+The launcher attaches the placeholder Git Surface through the standalone Host Adapter and prints its URL plus the loopback health URL. The surface uses port `5173` by default; `CODEX_GIT_SURFACE_PORT` and `CODEX_GIT_PORT` override the listener ports.
+
+The server scaffold can also be started separately:
 
 ```sh
 npm run dev:server
@@ -43,14 +45,14 @@ npm run build
 ## Workspace layout
 
 ```text
-apps/launcher                  Runtime composition placeholder
+apps/launcher                  Standalone runtime composition root
 apps/server                    Loopback server scaffold
 apps/ui                        Standalone React placeholder surface
 packages/protocol              Shared protocol types
 packages/repository-engine     Repository session boundary only
 packages/host-adapter          Host Adapter boundary
 packages/host-adapter/*        Codex CDP and standalone adapter placeholders
-tests/                         Reserved contract, integration, and end-to-end layers
+tests/                         Contract, integration, end-to-end, and fixture layers
 ```
 
 # codex-git
