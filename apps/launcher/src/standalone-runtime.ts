@@ -1,6 +1,7 @@
 import type { Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
 
+import type { HostConnection } from '@codex-git/host-adapter';
 import { createAppServer } from '@codex-git/server';
 import { StandaloneHostAdapter } from '@codex-git/host-adapter-standalone';
 import { createServer as createViteServer, type ViteDevServer } from 'vite';
@@ -26,13 +27,11 @@ export async function startStandaloneRuntime(
 ): Promise<StandaloneRuntime> {
   const healthServer = createAppServer();
   let surfaceServer: ViteDevServer | undefined;
-  let hostConnection: Awaited<
-    ReturnType<StandaloneHostAdapter['attach']>
-  > | null = null;
+  let hostConnection: HostConnection | null = null;
 
   async function closeResources(): Promise<void> {
     await Promise.all([
-      hostConnection?.dispose(),
+      hostConnection?.close(),
       surfaceServer?.close(),
       closeServer(healthServer),
     ]);
@@ -53,10 +52,11 @@ export async function startStandaloneRuntime(
     await surfaceServer.listen();
 
     const surfaceUrl = serverUrl(surfaceServer.httpServer, '/');
-    hostConnection = await new StandaloneHostAdapter().attach({
+    const hostResult = await new StandaloneHostAdapter().attach({
       title: 'Codex Git',
       url: surfaceUrl,
     });
+    hostConnection = hostResult.connection;
 
     let closed = false;
 

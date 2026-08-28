@@ -6,6 +6,7 @@
   "exports": "./src/index.ts",
   "types": "./src/index.ts",
   "dependencies": {
+    "@codex-git/host-adapter": "*",
     "@codex-git/host-adapter-standalone": "*",
     "@codex-git/server": "*"
   },

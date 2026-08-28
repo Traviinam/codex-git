@@ -8,10 +8,15 @@ import type {
 
 const standaloneContext = {
   projectPath: null,
+  task: null,
   theme: 'system',
 } satisfies HostContext;
 
 class StandaloneHostConnection implements HostConnection {
+  currentContext(): HostContext {
+    return standaloneContext;
+  }
+
   async *contexts(): AsyncIterable<HostContext> {
     yield standaloneContext;
   }
@@ -20,12 +25,15 @@ class StandaloneHostConnection implements HostConnection {
     return { status: 'unsupported' };
   }
 
-  async dispose(): Promise<void> {}
+  async close(): Promise<void> {}
 }
 
 export class StandaloneHostAdapter implements HostAdapter {
-  async attach(surface: SurfaceDescriptor): Promise<HostConnection> {
+  async attach(surface: SurfaceDescriptor) {
     void surface;
-    return new StandaloneHostConnection();
+    return {
+      kind: 'attached' as const,
+      connection: new StandaloneHostConnection(),
+    };
   }
 }
