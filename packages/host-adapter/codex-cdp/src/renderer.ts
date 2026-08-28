@@ -15,11 +15,6 @@ export interface CodexRenderer {
   subscribeContext(listener: (context: HostContext) => void): () => void;
 }
 
-export type CodexRendererSubscription = (
-  renderer: CodexRenderer | null,
-) => void;
-
 export interface CodexRendererSource {
   current(): Promise<CodexRenderer | null>;
-  subscribe(listener: CodexRendererSubscription): () => void;
 }

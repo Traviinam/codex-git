@@ -6,10 +6,8 @@ import type {
   SurfaceDescriptor,
 } from '@codex-git/host-adapter';
 
-import type { CodexRenderer } from './renderer.js';
-
-const sidebarEntrySelector = '[data-codex-git-sidebar-entry]';
-const surfaceSelector = '[data-codex-git-surface]';
+import type { CompatibleCodexAnchors } from './compatibility.js';
+import type { CodexRenderer, CspBypassLease } from './renderer.js';
 
 interface ActiveFrame {
   readonly capability: string;
@@ -20,6 +18,8 @@ interface ActiveFrame {
 
 export class CodexHostConnection implements HostConnection {
   private closed = false;
+  private closeAttempt: Promise<void> | null = null;
+  private closeNotified = false;
   private activeFrame: ActiveFrame | null = null;
   private context: HostContext;
   private readonly contextClosers = new Set<() => void>();
@@ -27,53 +27,66 @@ export class CodexHostConnection implements HostConnection {
     (context: HostContext) => void
   >();
   private readonly gitEntry: HTMLButtonElement;
+  private frameGeneration = 0;
   private readonly mainSurface: HTMLElement;
   private mountedSurface: HTMLElement | null = null;
   private readonly originalMainHidden: boolean;
   private readonly sidebar: HTMLElement;
-  private readonly unsubscribeContext: () => void;
+  private unsubscribeContext: () => void = () => undefined;
 
   constructor(
     private readonly renderer: CodexRenderer,
+    private cspBypass: CspBypassLease | null,
+    anchors: CompatibleCodexAnchors,
     private readonly surface: SurfaceDescriptor,
     private readonly createSecret: () => string,
-    private readonly nextFrameGeneration: () => number,
     private readonly onClose: () => void,
   ) {
     const { document, window } = renderer;
-    const sidebar = document.querySelector('#app-shell-sidebar');
-    const mainSurface = document.querySelector(
-      '[data-app-shell-main-surface="default"]',
-    );
+    this.sidebar = anchors.sidebar;
+    this.mainSurface = anchors.mainSurface;
+    this.originalMainHidden = anchors.mainSurface.hidden;
+    this.context = renderer.currentContext();
     if (
-      !(sidebar instanceof window.HTMLElement) ||
-      !(mainSurface instanceof window.HTMLElement)
+      !anchors.sidebar.isConnected ||
+      !anchors.mainSurface.isConnected ||
+      anchors.sidebar.ownerDocument !== document ||
+      anchors.mainSurface.ownerDocument !== document
     ) {
       throw new Error('Compatible Codex anchors disappeared before attachment');
     }
-
-    this.sidebar = sidebar;
-    this.mainSurface = mainSurface;
-    this.originalMainHidden = mainSurface.hidden;
-    this.context = renderer.currentContext();
-    this.unsubscribeContext = renderer.subscribeContext(this.handleContext);
-    document
-      .querySelectorAll(`${sidebarEntrySelector}, ${surfaceSelector}`)
-      .forEach((node) => node.remove());
 
     this.gitEntry = document.createElement('button');
     this.gitEntry.dataset.codexGitSidebarEntry = '';
     this.gitEntry.type = 'button';
     this.gitEntry.textContent = 'Git';
     this.gitEntry.setAttribute('aria-label', 'Open Codex Git');
-    const nativeEntry = sidebar.querySelector('button');
+    const nativeEntry = anchors.sidebar.querySelector('button');
     if (nativeEntry instanceof window.HTMLButtonElement) {
       this.gitEntry.className = nativeEntry.className;
     }
-    this.gitEntry.addEventListener('click', this.openGitSurface);
-    this.sidebar.addEventListener('click', this.handleSidebarNavigation, true);
-    renderer.window.addEventListener('message', this.handleFrameMessage);
-    this.sidebar.append(this.gitEntry);
+    try {
+      this.unsubscribeContext = renderer.subscribeContext(this.handleContext);
+      this.gitEntry.addEventListener('click', this.openGitSurface);
+      this.sidebar.addEventListener(
+        'click',
+        this.handleSidebarNavigation,
+        true,
+      );
+      renderer.window.addEventListener('message', this.handleFrameMessage);
+      this.sidebar.append(this.gitEntry);
+    } catch (error) {
+      this.unsubscribeContext();
+      this.gitEntry.removeEventListener('click', this.openGitSurface);
+      this.sidebar.removeEventListener(
+        'click',
+        this.handleSidebarNavigation,
+        true,
+      );
+      renderer.window.removeEventListener('message', this.handleFrameMessage);
+      this.gitEntry.remove();
+      throw error;
+    }
   }
 
   currentContext(): HostContext {
@@ -122,34 +135,50 @@ export class CodexHostConnection implements HostConnection {
     switch (action.kind) {
       case 'restore-native-surface':
         this.restoreNativeSurface();
-        return { status: 'completed' };
+        return { status: 'succeeded' };
     }
   }
 
-  async close(): Promise<void> {
-    if (this.closed) {
-      return;
+  close(): Promise<void> {
+    if (this.closeAttempt === null) {
+      this.closeAttempt = this.closeOnce().catch((error: unknown) => {
+        this.closeAttempt = null;
+        throw error;
+      });
+    }
+    return this.closeAttempt;
+  }
+
+  private async closeOnce(): Promise<void> {
+    if (!this.closed) {
+      this.closed = true;
+      this.unsubscribeContext();
+      this.contextClosers.forEach((close) => close());
+      this.contextClosers.clear();
+      this.contextSubscribers.clear();
+      this.gitEntry.removeEventListener('click', this.openGitSurface);
+      this.sidebar.removeEventListener(
+        'click',
+        this.handleSidebarNavigation,
+        true,
+      );
+      this.renderer.window.removeEventListener(
+        'message',
+        this.handleFrameMessage,
+      );
+      this.gitEntry.remove();
+      this.removeMountedSurface();
+      this.mainSurface.hidden = this.originalMainHidden;
     }
 
-    this.closed = true;
-    this.unsubscribeContext();
-    this.contextClosers.forEach((close) => close());
-    this.contextClosers.clear();
-    this.contextSubscribers.clear();
-    this.gitEntry.removeEventListener('click', this.openGitSurface);
-    this.sidebar.removeEventListener(
-      'click',
-      this.handleSidebarNavigation,
-      true,
-    );
-    this.renderer.window.removeEventListener(
-      'message',
-      this.handleFrameMessage,
-    );
-    this.gitEntry.remove();
-    this.removeMountedSurface();
-    this.mainSurface.hidden = this.originalMainHidden;
-    this.onClose();
+    if (this.cspBypass !== null) {
+      await this.cspBypass.release();
+      this.cspBypass = null;
+    }
+    if (!this.closeNotified) {
+      this.closeNotified = true;
+      this.onClose();
+    }
   }
 
   isGitSurfaceOpen(): boolean {
@@ -161,7 +190,7 @@ export class CodexHostConnection implements HostConnection {
       return;
     }
 
-    this.removeMountedSurface();
+    this.restoreNativeSurface();
     const { document } = this.renderer;
     const host = document.createElement('main');
     host.dataset.codexGitSurface = '';
@@ -183,19 +212,26 @@ export class CodexHostConnection implements HostConnection {
       height: '100%',
       width: '100%',
     });
-    this.activeFrame = {
+    const activeFrame = {
       capability: this.createSecret(),
       challenge: this.createSecret(),
       frame,
-      generation: this.nextFrameGeneration(),
+      generation: ++this.frameGeneration,
     };
     frame.addEventListener('load', this.publishHostContext);
-    host.append(frame);
-
-    this.mainSurface.hidden = true;
-    this.mainSurface.after(host);
-    this.mountedSurface = host;
-    this.gitEntry.setAttribute('aria-current', 'page');
+    try {
+      host.append(frame);
+      this.mainSurface.after(host);
+      this.activeFrame = activeFrame;
+      this.mountedSurface = host;
+      this.mainSurface.hidden = true;
+      this.gitEntry.setAttribute('aria-current', 'page');
+    } catch (error) {
+      frame.removeEventListener('load', this.publishHostContext);
+      host.remove();
+      this.mainSurface.hidden = this.originalMainHidden;
+      throw error;
+    }
   }
 
   private readonly openGitSurface = () => {

@@ -17,7 +17,7 @@ export interface HostTaskContext {
 export type NativeHostAction = { readonly kind: 'restore-native-surface' };
 
 export interface NativeActionResult {
-  readonly status: 'completed' | 'rejected' | 'unsupported';
+  readonly status: 'succeeded' | 'rejected' | 'unsupported';
 }
 
 export interface SanitizedDiagnostic {

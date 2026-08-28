@@ -6,20 +6,11 @@ import type {
   SurfaceDescriptor,
 } from '@codex-git/host-adapter';
 
-import type {
-  CodexRenderer,
-  CodexRendererSource,
-  CspBypassLease,
-} from './renderer.js';
-import { ManagedCodexHostConnection } from './managed-connection.js';
+import type { CodexRendererSource, CspBypassLease } from './renderer.js';
+import { findCompatibleCodexAnchors } from './compatibility.js';
+import { CodexHostConnection } from './connection.js';
 
-const supportedCodexVersion = '26.820.60940';
-const sidebarSelector = '#app-shell-sidebar';
-const mainSurfaceSelector = '[data-app-shell-main-surface="default"]';
-const activeConnections = new WeakMap<
-  CodexRendererSource,
-  ManagedCodexHostConnection
->();
+const activeConnections = new WeakMap<Document, CodexHostConnection>();
 
 export interface CodexCdpHostAdapterOptions {
   readonly createSecret?: () => string;
@@ -39,7 +30,8 @@ export class CodexCdpHostAdapter implements HostAdapter {
       );
     }
 
-    if (!isCompatible(renderer)) {
+    const anchors = findCompatibleCodexAnchors(renderer);
+    if (anchors === null) {
       return standaloneRequired(
         'incompatible-host',
         `Codex Desktop ${safeVersion(renderer.version)} did not match the tested host structure; use the standalone surface.`,
@@ -48,25 +40,22 @@ export class CodexCdpHostAdapter implements HostAdapter {
 
     let cspBypass: CspBypassLease | null = null;
     try {
-      await activeConnections.get(this.options.rendererSource)?.close();
+      await activeConnections.get(renderer.document)?.close();
       cspBypass = await renderer.acquireCspBypass();
-      const connection = new ManagedCodexHostConnection(
+      const connection = new CodexHostConnection(
         renderer,
         cspBypass,
-        this.options.rendererSource,
+        anchors,
         surface,
         this.options.createSecret ?? createSecret,
-        isCompatible,
         () => {
-          if (
-            activeConnections.get(this.options.rendererSource) === connection
-          ) {
-            activeConnections.delete(this.options.rendererSource);
+          if (activeConnections.get(renderer.document) === connection) {
+            activeConnections.delete(renderer.document);
           }
         },
       );
       cspBypass = null;
-      activeConnections.set(this.options.rendererSource, connection);
+      activeConnections.set(renderer.document, connection);
       return {
         kind: 'attached',
         connection,
@@ -89,24 +78,6 @@ function safeVersion(version: string): string {
 
 function createSecret(): string {
   return randomBytes(32).toString('base64url');
-}
-
-function isCompatible(renderer: CodexRenderer): boolean {
-  if (
-    renderer.version !== supportedCodexVersion ||
-    renderer.ownership !== 'codex-git-dedicated' ||
-    renderer.id.length === 0
-  ) {
-    return false;
-  }
-
-  const sidebar = renderer.document.querySelector(sidebarSelector);
-  const mainSurface = renderer.document.querySelector(mainSurfaceSelector);
-
-  return (
-    sidebar instanceof renderer.window.HTMLElement &&
-    mainSurface instanceof renderer.window.HTMLElement
-  );
 }
 
 function standaloneRequired(

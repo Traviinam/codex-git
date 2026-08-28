@@ -4,6 +4,5 @@ export type { CodexCdpCommandTransport } from './csp-bypass.js';
 export type {
   CodexRenderer,
   CodexRendererSource,
-  CodexRendererSubscription,
   CspBypassLease,
 } from './renderer.js';

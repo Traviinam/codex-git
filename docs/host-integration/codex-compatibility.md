@@ -5,6 +5,12 @@ official Codex extension interface. The standalone Host Adapter remains the
 supported fallback whenever discovery, compatibility, attachment, or remounting
 cannot be proven safe.
 
+This foundation implements the typed Host Adapter contract, strict compatibility
+probe, DOM lifecycle, message boundary, and CSP lease primitive. Production CDP
+discovery and transport, dedicated-instance ownership binding, renderer and DOM
+replacement, launcher composition, fallback transitions, and manual smoke
+verification are tracked in [#30](https://github.com/codeacme17/codex-git/issues/30).
+
 ## Trust and ownership requirements
 
 Codex Git attaches only to a renderer selected through a loopback CDP endpoint
@@ -32,19 +38,21 @@ endpoint, or record it in ordinary logs.
 | ----------------------------- | ------------------ | --------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `26.820.60940` (build `7119`) | `151.0.7922.170`   | `#app-shell-sidebar`; `[data-app-shell-main-surface="default"]` | Installed renderer bundle inspection plus automated DOM fixture coverage |
 
-The automated fixture covers read-only probing, fail-closed fallback, one-entry
-mounting, native navigation, repeat attachment, renderer replacement, context
-updates, opaque iframe sandboxing, generation/capability/challenge rejection,
-CSP lease restoration, and complete teardown.
+The automated fixture covers read-only probing, fail-closed fallback,
+transactional attachment, one-entry mounting, native navigation, repeat
+attachment, context updates, opaque iframe sandboxing,
+generation/capability/challenge rejection, CSP lease restoration, and complete
+teardown.
 
 Any Codex version or DOM shape not listed here fails closed before mutation. A
 new version requires a new explicit profile and the same fixture and manual smoke
 matrix; do not widen selectors to make an unknown build appear compatible.
 
-## Manual smoke matrix
+## Pending manual smoke matrix
 
-Run the matrix only against a disposable dedicated profile with a loopback CDP
-endpoint. Record the exact Codex and Chromium versions with the result.
+Issue [#30](https://github.com/codeacme17/codex-git/issues/30) must run this
+matrix against a disposable dedicated profile with a loopback CDP endpoint and
+record the exact Codex and Chromium versions with the result.
 
 - Open `Git` and confirm exactly one entry and one full-page frame.
 - Select a native destination and confirm native content is restored with no

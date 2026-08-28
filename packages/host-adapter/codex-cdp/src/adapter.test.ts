@@ -76,6 +76,13 @@ describe('CodexCdpHostAdapter', () => {
       source: 'http://127.0.0.1:4173/',
     });
 
+    await expect(
+      result.connection.perform({ kind: 'restore-native-surface' }),
+    ).resolves.toEqual({ status: 'succeeded' });
+    expect(document.querySelector('[data-codex-git-surface]')).toBeNull();
+
+    gitEntry?.click();
+
     document.querySelector<HTMLButtonElement>('[data-native-entry]')?.click();
     expect({
       nativeHidden: nativeSurface?.hidden,
@@ -89,10 +96,9 @@ describe('CodexCdpHostAdapter', () => {
 
   it('keeps exactly one entry when the adapter attaches repeatedly', async () => {
     const dom = compatibleDom();
+    const renderer = fixtureRenderer(dom, '26.820.60940');
     const adapter = new CodexCdpHostAdapter({
-      rendererSource: new FixtureRendererSource(
-        fixtureRenderer(dom, '26.820.60940'),
-      ),
+      rendererSource: new FixtureRendererSource(renderer),
     });
     const surface = {
       title: 'Codex Git',
@@ -101,7 +107,9 @@ describe('CodexCdpHostAdapter', () => {
 
     const first = await adapter.attach(surface);
     documentEntry(dom)?.click();
-    const second = await adapter.attach(surface);
+    const second = await new CodexCdpHostAdapter({
+      rendererSource: new FixtureRendererSource(renderer),
+    }).attach(surface);
 
     expect({
       entries: dom.window.document.querySelectorAll(
@@ -252,45 +260,45 @@ describe('CodexCdpHostAdapter', () => {
     });
   });
 
-  it('reattaches after a compatible renderer replacement', async () => {
-    const firstDom = compatibleDom();
-    const secondDom = compatibleDom();
-    const source = new FixtureRendererSource(
-      fixtureRenderer(firstDom, '26.820.60940'),
+  it('rolls back attachment when mounting fails after subscription', async () => {
+    const dom = compatibleDom();
+    const leaseEvents: string[] = [];
+    const renderer = new FixtureRenderer(
+      dom,
+      '26.820.60940',
+      { projectPath: null, task: null, theme: 'system' },
+      leaseEvents,
     );
+    const sidebar = dom.window.document.querySelector('#app-shell-sidebar');
+    if (!(sidebar instanceof dom.window.HTMLElement)) {
+      throw new Error('Expected a compatible sidebar fixture');
+    }
+    const before = dom.window.document.documentElement.outerHTML;
+    sidebar.append = () => {
+      throw new Error('Mount failed');
+    };
+
     const result = await new CodexCdpHostAdapter({
-      rendererSource: source,
+      rendererSource: new FixtureRendererSource(renderer),
     }).attach({
       title: 'Codex Git',
       url: new URL('http://127.0.0.1:4173'),
     });
-    if (result.kind !== 'attached') {
-      throw new Error('Expected the compatible Codex renderer to attach');
-    }
-    documentEntry(firstDom)?.click();
 
-    source.publish(fixtureRenderer(secondDom, '26.820.60940'));
-    await new Promise<void>((resolve) => setImmediate(resolve));
-
-    expect({
-      oldEntry: documentEntry(firstDom) !== null,
-      oldSurface: documentFrame(firstDom) !== null,
-      oldSurfaceHidden: nativeSurface(firstDom)?.hidden,
-      replacementEntries: secondDom.window.document.querySelectorAll(
-        '[data-codex-git-sidebar-entry]',
-      ).length,
-      replacementSurface: documentFrame(secondDom) !== null,
-    }).toEqual({
-      oldEntry: false,
-      oldSurface: false,
-      oldSurfaceHidden: false,
-      replacementEntries: 1,
-      replacementSurface: true,
+    expect(result).toEqual({
+      kind: 'standalone-required',
+      reason: {
+        code: 'attach-failed',
+        message:
+          'The compatible Codex renderer could not be attached; use the standalone surface.',
+      },
     });
-
-    await result.connection.close();
-    expect(documentEntry(secondDom)).toBeNull();
-    expect(nativeSurface(secondDom)?.hidden).toBe(false);
+    expect(dom.window.document.documentElement.outerHTML).toBe(before);
+    expect(renderer.contextSubscriberCount()).toBe(0);
+    expect(leaseEvents).toEqual([
+      'acquire:renderer-fixture',
+      'release:renderer-fixture',
+    ]);
   });
 
   it('scopes CSP bypass to a dedicated renderer lease', async () => {
@@ -358,24 +366,10 @@ describe('CodexCdpHostAdapter', () => {
 });
 
 class FixtureRendererSource implements CodexRendererSource {
-  private readonly listeners = new Set<
-    (renderer: CodexRenderer | null) => void
-  >();
-
   constructor(private renderer: CodexRenderer | null) {}
 
   async current(): Promise<CodexRenderer | null> {
     return this.renderer;
-  }
-
-  publish(renderer: CodexRenderer | null): void {
-    this.renderer = renderer;
-    this.listeners.forEach((listener) => listener(renderer));
-  }
-
-  subscribe(listener: (renderer: CodexRenderer | null) => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
   }
 }
 
@@ -396,12 +390,6 @@ function documentEntry(dom: JSDOM): HTMLButtonElement | null {
 
 function documentFrame(dom: JSDOM): HTMLIFrameElement | null {
   return dom.window.document.querySelector('[data-codex-git-surface] iframe');
-}
-
-function nativeSurface(dom: JSDOM): HTMLElement | null {
-  return dom.window.document.querySelector(
-    '[data-app-shell-main-surface="default"]',
-  );
 }
 
 async function captureHostContext(
@@ -501,6 +489,10 @@ class FixtureRenderer implements CodexRenderer {
   publishContext(context: HostContext): void {
     this.context = context;
     this.listeners.forEach((listener) => listener(context));
+  }
+
+  contextSubscriberCount(): number {
+    return this.listeners.size;
   }
 
   failNextCspRelease(): void {
