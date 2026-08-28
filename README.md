@@ -2,6 +2,15 @@
 
 Codex Git is a planned local Git surface for Codex Desktop. This repository currently contains only the initial application scaffold; Worktree discovery, Git commands, Codex injection, packaging, and other product features are not implemented.
 
+## Product and architecture
+
+- [Domain language](./CONTEXT.md)
+- [macOS MVP product requirements](./docs/product/mvp-prd.md)
+- [MVP technical architecture](./docs/architecture/mvp-technical-architecture.md)
+- Architecture decisions:
+  - [Isolate Codex host integration behind a Host Adapter](./docs/adr/0001-isolate-codex-host-integration.md)
+  - [Use the system Git CLI behind a local Repository Engine](./docs/adr/0002-use-system-git-behind-repository-engine.md)
+
 ## Requirements
 
 - macOS
@@ -43,4 +52,5 @@ packages/host-adapter          Host Adapter boundary
 packages/host-adapter/*        Codex CDP and standalone adapter placeholders
 tests/                         Reserved contract, integration, and end-to-end layers
 ```
+
 # codex-git
