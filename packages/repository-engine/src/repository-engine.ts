@@ -105,6 +105,7 @@ interface ResolvedAnchor {
 }
 
 interface CanonicalRegistration {
+  readonly adminIdentity: string | null;
   readonly canonicalPath: AbsolutePath | null;
   readonly canonicalPathBytes: Uint8Array;
   readonly pathKey: string;
@@ -190,7 +191,7 @@ async function discoverRepository(
   );
   assertSessionGeneration(state, sessionGeneration);
   const records = parseWorktreeListPorcelain(inventory);
-  const registrations = await Promise.all(
+  const resolvedRegistrations = await Promise.all(
     records.map((record) =>
       canonicalizeRegistration(record, resolved.commonGitDirectory),
     ),
@@ -203,6 +204,7 @@ async function discoverRepository(
     state,
     sessionGeneration,
   );
+  const registrations = rejectDuplicateAdminIdentities(resolvedRegistrations);
   const nextGenerations = new Map<string, WorktreeIdentityState>();
   const seenPaths = new Set<string>();
 
@@ -325,6 +327,7 @@ async function canonicalizeRegistration(
   commonGitDirectory: AbsolutePath,
 ): Promise<CanonicalRegistration> {
   let canonicalPathBytes: Uint8Array;
+  let adminIdentity: string | null = null;
   let unavailableReason: string | null = null;
   const registeredPath = Buffer.from(record.pathBytes);
 
@@ -386,7 +389,9 @@ async function canonicalizeRegistration(
         if (resolvedCommonGitDirectory !== commonGitDirectory) {
           throw new WorktreeRegistrationMismatchError();
         }
-        evidence = `${pathKey}\0${workingTreeEvidence}\0${gitDirectory}\0${fileIdentity(await stat(gitDirectory))}`;
+        const gitDirectoryEvidence = fileIdentity(await stat(gitDirectory));
+        adminIdentity = `${gitDirectory}\0${gitDirectoryEvidence}`;
+        evidence = `${pathKey}\0${workingTreeEvidence}\0${adminIdentity}`;
       } catch (error) {
         if (!isUnresolvableWorktreeError(error)) {
           throw error;
@@ -402,6 +407,7 @@ async function canonicalizeRegistration(
   }
 
   return {
+    adminIdentity,
     canonicalPath,
     canonicalPathBytes,
     pathKey,
@@ -409,6 +415,33 @@ async function canonicalizeRegistration(
     record,
     unavailableReason,
   };
+}
+
+function rejectDuplicateAdminIdentities(
+  registrations: readonly CanonicalRegistration[],
+): readonly CanonicalRegistration[] {
+  const counts = new Map<string, number>();
+  for (const { adminIdentity } of registrations) {
+    if (adminIdentity !== null) {
+      counts.set(adminIdentity, (counts.get(adminIdentity) ?? 0) + 1);
+    }
+  }
+
+  return registrations.map((registration) => {
+    if (
+      registration.adminIdentity === null ||
+      counts.get(registration.adminIdentity) === 1
+    ) {
+      return registration;
+    }
+    return {
+      ...registration,
+      adminIdentity: null,
+      evidence: unavailableEvidence(registration.record, registration.pathKey),
+      unavailableReason:
+        'The registered Working Tree resolves to a Git admin directory shared by another registration.',
+    };
+  });
 }
 
 function toDiscoveredWorktree(
@@ -583,6 +616,8 @@ function assertSessionGeneration(
 
 function closeSession(state: SessionState): void {
   if (state.status === 'open') {
+    // Issue #7 owns child-process cancellation and reconciliation. This issue
+    // invalidates the generation immediately so a completed read cannot publish.
     state.status = 'closed';
     state.generation += 1;
   }

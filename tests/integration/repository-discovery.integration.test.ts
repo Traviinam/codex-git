@@ -3,6 +3,7 @@ import {
   chmod,
   mkdtemp,
   mkdir,
+  readFile,
   realpath,
   rename,
   rm,
@@ -354,6 +355,51 @@ describe('Repository Engine discovery', () => {
       kind: 'unavailable',
       prunable: false,
     });
+  });
+
+  it('rejects same-Repository registrations that resolve to one admin directory', async () => {
+    const repository = await createRepositoryWithCommit();
+    const worktreeRoot = await mkdtemp(
+      join(tmpdir(), 'codex-git-duplicate-admin-'),
+    );
+    externalPaths.push(worktreeRoot);
+    const firstPath = join(worktreeRoot, 'first');
+    const secondPath = join(worktreeRoot, 'second');
+    await repository.git(
+      'worktree',
+      'add',
+      '--quiet',
+      '-b',
+      'feature/first-admin',
+      firstPath,
+    );
+    await repository.git(
+      'worktree',
+      'add',
+      '--quiet',
+      '-b',
+      'feature/second-admin',
+      secondPath,
+    );
+    await writeFile(
+      join(firstPath, '.git'),
+      await readFile(join(secondPath, '.git')),
+    );
+
+    const result = await openRepository(
+      createRepositoryEngine(),
+      repository.path,
+    );
+    const first = findWorktree(result, await realpath(firstPath));
+    const second = findWorktree(result, await realpath(secondPath));
+
+    expect(first.availability).toEqual({
+      kind: 'unavailable',
+      reason:
+        'The registered Working Tree resolves to a Git admin directory shared by another registration.',
+      prunable: false,
+    });
+    expect(second.availability.kind).toBe('unavailable');
   });
 
   it('discovers every registered Worktree without path or Branch conventions', async () => {
