@@ -35,16 +35,14 @@ import {
   repositorySnapshotSchema,
   type SessionMetadata,
   type WorktreeId,
+  type DiagnosticRedactor,
 } from '@codex-git/protocol';
 
 type Awaitable<T> = Promise<T> | T;
 
-export interface NativeActionHandler {
-  actionsForTarget(
-    targetId: NativeTargetId,
-  ): Awaitable<readonly NativeActionKind[] | undefined>;
-  perform(request: NativeActionRequest): Awaitable<NativeActionResult>;
-}
+export type NativeActionHandler = (
+  request: NativeActionRequest,
+) => Awaitable<NativeActionResult>;
 
 export interface ProtocolHandlers {
   readonly branchSearch?: (
@@ -67,12 +65,67 @@ export interface ProtocolDispatchResponse {
   readonly value: unknown;
 }
 
+const defaultResponseBodyBytes = PROTOCOL_LIMITS.diffOutputBytes;
+const diffResponseBodyBytes = PROTOCOL_LIMITS.diffOutputBytes * 6 + 16_384;
+
+export const PROTOCOL_ENDPOINTS = {
+  branches: { method: 'POST', responseBodyBytes: defaultResponseBodyBytes },
+  commands: { method: 'POST', responseBodyBytes: defaultResponseBodyBytes },
+  diff: { method: 'POST', responseBodyBytes: diffResponseBodyBytes },
+  draft: { method: 'PUT', responseBodyBytes: defaultResponseBodyBytes },
+  events: { method: 'GET', responseBodyBytes: defaultResponseBodyBytes },
+  'native-actions': {
+    method: 'POST',
+    responseBodyBytes: defaultResponseBodyBytes,
+  },
+  operations: { method: 'POST', responseBodyBytes: defaultResponseBodyBytes },
+  session: { method: 'GET', responseBodyBytes: defaultResponseBodyBytes },
+  snapshot: { method: 'GET', responseBodyBytes: defaultResponseBodyBytes },
+} as const;
+
+export type ProtocolEndpoint = keyof typeof PROTOCOL_ENDPOINTS;
+
+export function resolveProtocolEndpoint(
+  value: string,
+): ProtocolEndpoint | undefined {
+  return Object.hasOwn(PROTOCOL_ENDPOINTS, value)
+    ? (value as ProtocolEndpoint)
+    : undefined;
+}
+
 export interface ProtocolDispatcher {
   readonly sessionMetadata: SessionMetadata;
   dispatch(
-    endpoint: string,
+    endpoint: ProtocolEndpoint,
     body?: Uint8Array,
   ): Promise<ProtocolDispatchResponse | undefined>;
+}
+
+const diagnosticKeys = new Set(['message', 'reason']);
+const fatalUtf8Decoder = new TextDecoder('utf-8', { fatal: true });
+
+export function redactProtocolDiagnostics(
+  value: unknown,
+  redact: DiagnosticRedactor,
+  key?: string,
+): unknown {
+  if (typeof value === 'string') {
+    if (key === undefined || !diagnosticKeys.has(key)) return value;
+    const redacted = redact(value);
+    return redacted.length > value.length
+      ? redacted.slice(0, value.length)
+      : redacted;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactProtocolDiagnostics(entry, redact));
+  }
+  if (typeof value !== 'object' || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([entryKey, entry]) => [
+      entryKey,
+      redactProtocolDiagnostics(entry, redact, entryKey),
+    ]),
+  );
 }
 
 export function createProtocolDispatcher(
@@ -85,6 +138,7 @@ export function createProtocolDispatcher(
       readonly response: Promise<ProtocolDispatchResponse>;
     }
   >();
+  let issuedNativeActions = new Map<NativeTargetId, Set<NativeActionKind>>();
 
   return {
     sessionMetadata: {
@@ -102,10 +156,12 @@ export function createProtocolDispatcher(
     },
     async dispatch(endpoint, body) {
       if (endpoint === 'snapshot' && handlers.snapshot !== undefined) {
-        return validatedResponse(
-          repositorySnapshotSchema,
+        const snapshot = repositorySnapshotSchema.safeParse(
           await handlers.snapshot(),
         );
+        if (!snapshot.success) return invalidHandlerResponse();
+        issuedNativeActions = collectNativeActions(snapshot.data);
+        return { status: 200, value: snapshot.data };
       }
       if (endpoint === 'diff' && handlers.diff !== undefined) {
         const input = parseJsonBody(body);
@@ -221,20 +277,39 @@ export function createProtocolDispatcher(
         if (!request.ok) {
           return { status: 400, value: { error: request.error } };
         }
-        const allowed = await handlers.nativeActions.actionsForTarget(
-          request.value.targetId,
-        );
-        if (allowed === undefined || !allowed.includes(request.value.kind)) {
+        if (
+          !issuedNativeActions
+            .get(request.value.targetId)
+            ?.has(request.value.kind)
+        ) {
           return staleNativeTargetResponse();
         }
         return validatedResponse(
           nativeActionResultSchema,
-          await handlers.nativeActions.perform(request.value),
+          await handlers.nativeActions(request.value),
         );
       }
       return undefined;
     },
   };
+}
+
+function collectNativeActions(
+  snapshot: RepositorySnapshot,
+): Map<NativeTargetId, Set<NativeActionKind>> {
+  const issued = new Map<NativeTargetId, Set<NativeActionKind>>();
+  for (const worktree of snapshot.worktrees) {
+    const descriptors = [
+      ...worktree.nativeTargets,
+      ...worktree.changes.flatMap((change) => change.nativeTargets),
+    ];
+    for (const descriptor of descriptors) {
+      const actions = issued.get(descriptor.targetId) ?? new Set();
+      descriptor.actions.forEach((action) => actions.add(action));
+      issued.set(descriptor.targetId, actions);
+    }
+  }
+  return issued;
 }
 
 function fingerprintCommand(command: CommandEnvelope['command']): string {
@@ -360,7 +435,7 @@ function parseJsonBody(body: Uint8Array | undefined): JsonBodyResult {
   try {
     return {
       ok: true,
-      value: JSON.parse(new TextDecoder().decode(body)) as unknown,
+      value: JSON.parse(fatalUtf8Decoder.decode(body)) as unknown,
     };
   } catch {
     return {

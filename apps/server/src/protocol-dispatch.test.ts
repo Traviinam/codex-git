@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   branchSearchResultSchema,
   commitDraftSchema,
+  PROTOCOL_LIMITS,
   PROTOCOL_VERSION_HEADER,
   diffResultSchema,
   operationReceiptSchema,
@@ -23,14 +24,36 @@ afterEach(async () => {
 });
 
 describe('protocol HTTP dispatch', () => {
-  it('routes snapshots through an installed handler without advertising absent handlers', async () => {
+  it('routes snapshots with redacted diagnostics without advertising absent handlers', async () => {
     const snapshot = repositorySnapshotSchema.parse({
       repositoryId: 'repository_0123456789abcdef0123456789abcdef',
       repositoryRevision: 4,
       topologyRevision: 2,
       refsRevision: 3,
-      refresh: { kind: 'current' },
-      worktrees: [],
+      refresh: {
+        kind: 'stale',
+        message: 'Authorization: Bearer fixture-snapshot-token',
+      },
+      worktrees: [
+        {
+          worktreeId: 'worktree_0123456789abcdef0123456789abcdef',
+          worktreeRevision: 1,
+          generation: 'generation_0123456789abcdef0123456789abcdef',
+          freshness: {
+            kind: 'failed',
+            message:
+              'remote=https://alice:fixture-password@example.com/repo.git',
+          },
+          head: { kind: 'initial' },
+          indexTree: null,
+          status: {
+            kind: 'unavailable',
+            reason: 'token=fixture-unavailable-secret',
+          },
+          changes: [],
+          nativeTargets: [],
+        },
+      ],
       remotes: [],
       operations: [],
     });
@@ -46,13 +69,14 @@ describe('protocol HTTP dispatch', () => {
       fetch(endpointUrl(server, 'snapshot'), { headers }),
     ]);
 
+    const snapshotBody = await snapshotResponse.json();
     expect({
       capabilities: (
         (await sessionResponse.json()) as {
           capabilities: Record<string, boolean>;
         }
       ).capabilities,
-      snapshot: await snapshotResponse.json(),
+      snapshotIsValid: repositorySnapshotSchema.safeParse(snapshotBody).success,
       snapshotStatus: snapshotResponse.status,
     }).toEqual({
       capabilities: {
@@ -64,9 +88,23 @@ describe('protocol HTTP dispatch', () => {
         nativeActions: false,
         operationRecovery: false,
       },
-      snapshot,
+      snapshotIsValid: true,
       snapshotStatus: 200,
     });
+    expect(snapshotBody).toMatchObject({
+      refresh: { message: 'Authorization: [REDACTED]' },
+      worktrees: [
+        {
+          freshness: {
+            message: 'remote=https://[REDACTED]@example.com/repo.git',
+          },
+          status: { reason: 'token=[REDACTED]' },
+        },
+      ],
+    });
+    expect(JSON.stringify(snapshotBody)).not.toMatch(
+      /fixture-(?:snapshot-token|password|unavailable-secret)/u,
+    );
     expect(handleSnapshot).toHaveBeenCalledOnce();
   });
 
@@ -113,6 +151,39 @@ describe('protocol HTTP dispatch', () => {
       status: 400,
     });
     expect(handleDiff).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed UTF-8 JSON bytes before calling a handler', async () => {
+    const searchBranches = vi.fn(() =>
+      branchSearchResultSchema.parse({ refsRevision: 1, candidates: [] }),
+    );
+    const server = await startLoopbackServer({
+      allowedOrigins: ['null'],
+      handlers: { branchSearch: searchBranches },
+    });
+    servers.push(server);
+    const prefix = new TextEncoder().encode(
+      `{"worktreeId":"worktree_0123456789abcdef0123456789abcdef","query":"`,
+    );
+    const suffix = new TextEncoder().encode('"}');
+    const body = Uint8Array.from([...prefix, 0xc3, 0x28, ...suffix]);
+
+    const response = await fetch(endpointUrl(server, 'branches'), {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body,
+    });
+
+    expect({ body: await response.json(), status: response.status }).toEqual({
+      body: {
+        error: {
+          code: 'invalid_payload',
+          message: 'The protocol request body is not valid JSON.',
+        },
+      },
+      status: 400,
+    });
+    expect(searchBranches).not.toHaveBeenCalled();
   });
 
   it('does not serialize a handler response that fails runtime validation', async () => {
@@ -179,6 +250,36 @@ describe('protocol HTTP dispatch', () => {
         },
       },
       status: 500,
+    });
+  });
+
+  it('returns a diff at the exact negotiated content limit', async () => {
+    const fileId = 'file_cccccccccccccccccccccccccccccccc';
+    const content = 'x'.repeat(PROTOCOL_LIMITS.diffOutputBytes);
+    const server = await startLoopbackServer({
+      allowedOrigins: ['null'],
+      handlers: {
+        diff: () =>
+          diffResultSchema.parse({
+            kind: 'text',
+            fileId,
+            baseline: 'head_to_index',
+            content,
+            lineCount: 1,
+          }),
+      },
+    });
+    servers.push(server);
+
+    const response = await postJson(server, 'diff', { fileId });
+    const body = (await response.json()) as { content?: string };
+
+    expect({
+      contentBytes: body.content?.length,
+      status: response.status,
+    }).toEqual({
+      contentBytes: PROTOCOL_LIMITS.diffOutputBytes,
+      status: 200,
     });
   });
 
@@ -455,16 +556,25 @@ describe('protocol HTTP dispatch', () => {
 
   it('routes operation recovery by opaque Operation ID', async () => {
     const operationId = 'operation_33333333333333333333333333333333';
+    const launchToken = 'ab'.repeat(32);
     const result = operationResultSchema.parse({
-      kind: 'unknown_outcome',
+      kind: 'partial_success',
       operationId,
-      code: 'reconciliation_incomplete',
-      message: 'Repository state is still being reconciled.',
-      recoveryAvailable: true,
+      message: `Recovery retained ${launchToken}`,
+      effects: [
+        { kind: 'succeeded', label: 'origin' },
+        {
+          kind: 'failed_known',
+          label: 'backup',
+          code: 'authentication',
+          message: 'Authorization: Bearer fixture-operation-token',
+        },
+      ],
     });
     const recoverOperation = vi.fn(() => result);
     const server = await startLoopbackServer({
       allowedOrigins: ['null'],
+      randomBytes: (length) => new Uint8Array(length).fill(0xab),
       handlers: { operationRecovery: recoverOperation },
     });
     servers.push(server);
@@ -474,11 +584,23 @@ describe('protocol HTTP dispatch', () => {
       await fetch(server.sessionUrl, { headers })
     ).json()) as { capabilities: { operationRecovery: boolean } };
 
+    const responseBody = await response.json();
     expect({
       capability: session.capabilities.operationRecovery,
-      result: await response.json(),
+      resultIsValid: operationResultSchema.safeParse(responseBody).success,
       status: response.status,
-    }).toEqual({ capability: true, result, status: 200 });
+    }).toEqual({ capability: true, resultIsValid: true, status: 200 });
+    expect(responseBody).toMatchObject({
+      message: 'Recovery retained [REDACTED]',
+      effects: [
+        { kind: 'succeeded' },
+        { message: 'Authorization: [REDACTED]' },
+      ],
+    });
+    expect(JSON.stringify(responseBody)).not.toContain(launchToken);
+    expect(JSON.stringify(responseBody)).not.toContain(
+      'fixture-operation-token',
+    );
     expect(recoverOperation).toHaveBeenCalledWith(operationId);
   });
 
@@ -511,38 +633,28 @@ describe('protocol HTTP dispatch', () => {
     });
   });
 
-  it('rejects a native action outside the server-issued target allow-list', async () => {
-    const targetId = 'native_66666666666666666666666666666666';
-    const actionsForTarget = vi.fn((candidate: string) =>
-      candidate === targetId ? (['copy_relative_path'] as const) : undefined,
-    );
+  it('rejects a fabricated native target that was not issued by the snapshot', async () => {
+    const issuedTargetId = 'native_66666666666666666666666666666666';
     const perform = vi.fn(() => ({ kind: 'performed' as const }));
     const server = await startLoopbackServer({
       allowedOrigins: ['null'],
-      handlers: { nativeActions: { actionsForTarget, perform } },
+      handlers: {
+        snapshot: () => nativeSnapshot(issuedTargetId, ['copy_relative_path']),
+        nativeActions: perform,
+      },
     });
     servers.push(server);
 
+    await fetch(endpointUrl(server, 'snapshot'), { headers });
     const response = await postJson(server, 'native-actions', {
-      kind: 'open_default_app',
-      targetId,
-    });
-    const unissued = await postJson(server, 'native-actions', {
       kind: 'copy_relative_path',
       targetId: 'native_99999999999999999999999999999999',
     });
-    const session = (await (
-      await fetch(server.sessionUrl, { headers })
-    ).json()) as { capabilities: { nativeActions: boolean } };
 
     expect({
-      capability: session.capabilities.nativeActions,
       result: await response.json(),
       status: response.status,
-      unissued: await unissued.json(),
-      unissuedStatus: unissued.status,
     }).toEqual({
-      capability: true,
       result: {
         error: {
           code: 'stale_target',
@@ -550,15 +662,37 @@ describe('protocol HTTP dispatch', () => {
         },
       },
       status: 409,
-      unissued: {
+    });
+    expect(perform).not.toHaveBeenCalled();
+  });
+
+  it('rejects an action that was not issued for the native target', async () => {
+    const targetId = 'native_77777777777777777777777777777777';
+    const perform = vi.fn(() => ({ kind: 'performed' as const }));
+    const server = await startLoopbackServer({
+      allowedOrigins: ['null'],
+      handlers: {
+        snapshot: () => nativeSnapshot(targetId, ['copy_relative_path']),
+        nativeActions: perform,
+      },
+    });
+    servers.push(server);
+
+    await fetch(endpointUrl(server, 'snapshot'), { headers });
+    const response = await postJson(server, 'native-actions', {
+      kind: 'open_default_app',
+      targetId,
+    });
+
+    expect({ result: await response.json(), status: response.status }).toEqual({
+      result: {
         error: {
           code: 'stale_target',
           message: 'The native target is stale or does not allow this action.',
         },
       },
-      unissuedStatus: 409,
+      status: 409,
     });
-    expect(actionsForTarget).toHaveBeenCalledTimes(2);
     expect(perform).not.toHaveBeenCalled();
   });
 
@@ -571,15 +705,14 @@ describe('protocol HTTP dispatch', () => {
     const server = await startLoopbackServer({
       allowedOrigins: ['null'],
       handlers: {
-        nativeActions: {
-          actionsForTarget: () => ['copy_relative_path'],
-          perform,
-        },
+        snapshot: () => nativeSnapshot(targetId, ['copy_relative_path']),
+        nativeActions: perform,
       },
     });
     servers.push(server);
     const request = { kind: 'copy_relative_path', targetId } as const;
 
+    await fetch(endpointUrl(server, 'snapshot'), { headers });
     const response = await postJson(server, 'native-actions', request);
 
     expect({ result: await response.json(), status: response.status }).toEqual({
@@ -587,6 +720,40 @@ describe('protocol HTTP dispatch', () => {
       status: 200,
     });
     expect(perform).toHaveBeenCalledWith(request);
+  });
+
+  it('leaves current-state validation and execution in one native handler call', async () => {
+    const targetId = 'native_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    let targetExists = true;
+    const perform = vi.fn(() =>
+      targetExists
+        ? ({ kind: 'performed' } as const)
+        : ({
+            kind: 'unavailable',
+            message: 'The target no longer exists.',
+          } as const),
+    );
+    const server = await startLoopbackServer({
+      allowedOrigins: ['null'],
+      handlers: {
+        snapshot: () => nativeSnapshot(targetId, ['reveal_in_finder']),
+        nativeActions: perform,
+      },
+    });
+    servers.push(server);
+
+    await fetch(endpointUrl(server, 'snapshot'), { headers });
+    targetExists = false;
+    const response = await postJson(server, 'native-actions', {
+      kind: 'reveal_in_finder',
+      targetId,
+    });
+
+    expect({ result: await response.json(), status: response.status }).toEqual({
+      result: { kind: 'unavailable', message: 'The target no longer exists.' },
+      status: 200,
+    });
+    expect(perform).toHaveBeenCalledOnce();
   });
 });
 
@@ -605,5 +772,33 @@ function postJson(
     method: 'POST',
     headers: { ...headers, 'content-type': 'application/json' },
     body: JSON.stringify(value),
+  });
+}
+
+function nativeSnapshot(
+  targetId: string,
+  actions: readonly string[],
+): ReturnType<typeof repositorySnapshotSchema.parse> {
+  return repositorySnapshotSchema.parse({
+    repositoryId: 'repository_99999999999999999999999999999999',
+    repositoryRevision: 1,
+    topologyRevision: 1,
+    refsRevision: 1,
+    refresh: { kind: 'current' },
+    worktrees: [
+      {
+        worktreeId: 'worktree_99999999999999999999999999999999',
+        worktreeRevision: 1,
+        generation: 'generation_99999999999999999999999999999999',
+        freshness: { kind: 'current' },
+        head: { kind: 'initial' },
+        indexTree: null,
+        status: { kind: 'clean' },
+        changes: [],
+        nativeTargets: [{ targetId, actions }],
+      },
+    ],
+    remotes: [],
+    operations: [],
   });
 }

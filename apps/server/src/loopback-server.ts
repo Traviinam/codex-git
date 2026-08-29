@@ -10,14 +10,18 @@ import {
   PROTOCOL_VERSION,
   PROTOCOL_VERSION_HEADER,
   PROTOCOL_LIMITS,
-  redactDiagnostic,
+  createDiagnosticRedactor,
   sseInvalidationSchema,
   type HealthResponse,
+  type DiagnosticRedactor,
   type ProtocolError,
 } from '@codex-git/protocol';
 
 import {
   createProtocolDispatcher,
+  PROTOCOL_ENDPOINTS,
+  redactProtocolDiagnostics,
+  resolveProtocolEndpoint,
   type ProtocolDispatcher,
   type ProtocolHandlers,
 } from './protocol-dispatch.js';
@@ -28,17 +32,6 @@ const healthResponse = {
 } satisfies HealthResponse;
 
 const loopbackHost = '127.0.0.1' as const;
-const endpointMethods = new Map<string, string>([
-  ['branches', 'POST'],
-  ['commands', 'POST'],
-  ['diff', 'POST'],
-  ['draft', 'PUT'],
-  ['events', 'GET'],
-  ['native-actions', 'POST'],
-  ['operations', 'POST'],
-  ['session', 'GET'],
-  ['snapshot', 'GET'],
-]);
 export interface LoopbackAddress {
   readonly host: typeof loopbackHost;
   readonly port: number;
@@ -70,6 +63,7 @@ export async function startLoopbackServer(
   const token = Buffer.from(tokenBytes).toString('hex');
   const instancePrefix = `/instance/${token}/v1`;
   const allowedOrigins = new Set(options.allowedOrigins ?? []);
+  const redactDiagnostic = createDiagnosticRedactor({ secrets: [token] });
   const dispatcher = createProtocolDispatcher(options.handlers);
   const events = createEventBroker();
   const server = createServer((request, response) => {
@@ -79,6 +73,7 @@ export async function startLoopbackServer(
       token,
       instancePrefix,
       allowedOrigins,
+      redactDiagnostic,
       dispatcher,
       events,
     ).catch(() => {
@@ -132,6 +127,7 @@ async function handleRequest(
   token: string,
   instancePrefix: string,
   allowedOrigins: ReadonlySet<string>,
+  redactDiagnostic: DiagnosticRedactor,
   dispatcher: ProtocolDispatcher,
   events: EventBroker,
 ): Promise<void> {
@@ -178,16 +174,18 @@ async function handleRequest(
     return;
   }
 
-  const endpoint = pathname.startsWith(`${instancePrefix}/`)
+  const endpointName = pathname.startsWith(`${instancePrefix}/`)
     ? pathname.slice(instancePrefix.length + 1)
     : '';
-  const expectedMethod = endpointMethods.get(endpoint);
+  const endpoint = resolveProtocolEndpoint(endpointName);
+  const expectedMethod =
+    endpoint === undefined ? undefined : PROTOCOL_ENDPOINTS[endpoint].method;
   if (request.method === 'OPTIONS') {
     handlePreflight(request, response, origin, expectedMethod, allowedOrigins);
     return;
   }
 
-  if (endpoint !== 'events' && version !== String(PROTOCOL_VERSION)) {
+  if (endpointName !== 'events' && version !== String(PROTOCOL_VERSION)) {
     sendProtocolError(response, 426, {
       code: 'unsupported_protocol_version',
       details: {
@@ -207,7 +205,7 @@ async function handleRequest(
     return;
   }
 
-  if (expectedMethod === undefined) {
+  if (endpoint === undefined) {
     sendProtocolError(
       response,
       404,
@@ -280,7 +278,13 @@ async function handleRequest(
   try {
     const dispatched = await dispatcher.dispatch(endpoint, body);
     if (dispatched !== undefined) {
-      sendJson(response, dispatched.status, dispatched.value, origin);
+      sendJson(
+        response,
+        dispatched.status,
+        redactProtocolDiagnostics(dispatched.value, redactDiagnostic),
+        origin,
+        PROTOCOL_ENDPOINTS[endpoint].responseBodyBytes,
+      );
       return;
     }
   } catch {
@@ -521,9 +525,10 @@ function sendJson(
   status: number,
   value: unknown,
   origin?: string,
+  limitBytes: number = PROTOCOL_LIMITS.diffOutputBytes,
 ): void {
   const body = JSON.stringify(value);
-  if (Buffer.byteLength(body) > PROTOCOL_LIMITS.diffOutputBytes) {
+  if (Buffer.byteLength(body) > limitBytes) {
     response.writeHead(507, {
       ...(origin === undefined
         ? {}
@@ -534,7 +539,7 @@ function sendJson(
       JSON.stringify({
         error: {
           code: 'output_too_large',
-          details: { limitBytes: PROTOCOL_LIMITS.diffOutputBytes },
+          details: { limitBytes },
           message: 'The protocol response exceeds the configured limit.',
         },
       }),
