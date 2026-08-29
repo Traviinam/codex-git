@@ -18,6 +18,12 @@ const headers = {
   origin: 'null',
   [PROTOCOL_VERSION_HEADER]: '1',
 } as const;
+const staleTargetResponse = {
+  error: {
+    code: 'stale_target',
+    message: 'The native target is stale or does not allow this action.',
+  },
+};
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
@@ -50,11 +56,21 @@ describe('protocol HTTP dispatch', () => {
             kind: 'unavailable',
             reason: 'token=fixture-unavailable-secret',
           },
-          changes: [],
+          changes: Array.from({ length: 2_000 }, (_, index) => ({
+            baseline: 'index_to_working_tree',
+            displayPath: 'x'.repeat(4_096),
+            fileId: `file_${index.toString(16).padStart(32, '0')}`,
+            kind: 'change',
+            nativeTargets: [],
+          })),
           nativeTargets: [],
         },
       ],
-      remotes: [],
+      remotes: ['a.co', 'a.co:1', '1.1.1.1', '[::1]'].map((host, index) => ({
+        remoteId: `remote_${index.toString(16).padStart(32, '0')}`,
+        displayName: host,
+        host,
+      })),
       operations: [],
     });
     const handleSnapshot = vi.fn(() => snapshot);
@@ -70,15 +86,7 @@ describe('protocol HTTP dispatch', () => {
     ]);
 
     const snapshotBody = await snapshotResponse.json();
-    expect({
-      capabilities: (
-        (await sessionResponse.json()) as {
-          capabilities: Record<string, boolean>;
-        }
-      ).capabilities,
-      snapshotIsValid: repositorySnapshotSchema.safeParse(snapshotBody).success,
-      snapshotStatus: snapshotResponse.status,
-    }).toEqual({
+    expect(await sessionResponse.json()).toMatchObject({
       capabilities: {
         branchSearch: false,
         commands: false,
@@ -88,9 +96,9 @@ describe('protocol HTTP dispatch', () => {
         nativeActions: false,
         operationRecovery: false,
       },
-      snapshotIsValid: true,
-      snapshotStatus: 200,
     });
+    expect(repositorySnapshotSchema.safeParse(snapshotBody).success).toBe(true);
+    expect(snapshotResponse.status).toBe(200);
     expect(snapshotBody).toMatchObject({
       refresh: { message: 'Authorization: [REDACTED]' },
       worktrees: [
@@ -105,7 +113,20 @@ describe('protocol HTTP dispatch', () => {
     expect(JSON.stringify(snapshotBody)).not.toMatch(
       /fixture-(?:snapshot-token|password|unavailable-secret)/u,
     );
-    expect(handleSnapshot).toHaveBeenCalledOnce();
+
+    handleSnapshot.mockReturnValueOnce({
+      ...snapshot,
+      remotes: [
+        { ...snapshot.remotes[0]!, host: 'https://a:fixture@example.com' },
+      ],
+    });
+    const invalidHostResponse = await fetch(endpointUrl(server, 'snapshot'), {
+      headers,
+    });
+    const invalidHostBody =
+      await expectInvalidHandlerResponse(invalidHostResponse);
+    expect(JSON.stringify(invalidHostBody)).not.toContain('a:fixture');
+    expect(handleSnapshot).toHaveBeenCalledTimes(2);
   });
 
   it('rejects malformed diff requests before calling the installed handler', async () => {
@@ -209,17 +230,7 @@ describe('protocol HTTP dispatch', () => {
         fileId: 'file_0123456789abcdef0123456789abcdef',
       }),
     });
-    const body = JSON.stringify(await response.json());
-
-    expect({ body: JSON.parse(body), status: response.status }).toEqual({
-      body: {
-        error: {
-          code: 'internal_error',
-          message: 'The protocol handler returned an invalid response.',
-        },
-      },
-      status: 500,
-    });
+    const body = JSON.stringify(await expectInvalidHandlerResponse(response));
     expect(body).not.toContain('fixture-handler-secret');
   });
 
@@ -242,15 +253,7 @@ describe('protocol HTTP dispatch', () => {
       fileId: 'file_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     });
 
-    expect({ body: await response.json(), status: response.status }).toEqual({
-      body: {
-        error: {
-          code: 'internal_error',
-          message: 'The protocol handler returned an invalid response.',
-        },
-      },
-      status: 500,
-    });
+    await expectInvalidHandlerResponse(response);
   });
 
   it('returns a diff at the exact negotiated content limit', async () => {
@@ -286,14 +289,12 @@ describe('protocol HTTP dispatch', () => {
   it('dispatches branch search with validated opaque targets', async () => {
     const result = branchSearchResultSchema.parse({
       refsRevision: 7,
-      candidates: [
-        {
-          refId: 'ref_0123456789abcdef0123456789abcdef',
-          kind: 'local',
-          displayName: 'feature/protocol',
-          occupiedBy: null,
-        },
-      ],
+      candidates: Array.from({ length: 5_000 }, (_, index) => ({
+        refId: `ref_${index.toString(16).padStart(32, '0')}`,
+        kind: 'local' as const,
+        displayName: 'x'.repeat(1_024),
+        occupiedBy: null,
+      })),
     });
     const searchBranches = vi.fn(() => result);
     const server = await startLoopbackServer({
@@ -314,11 +315,9 @@ describe('protocol HTTP dispatch', () => {
       await fetch(server.sessionUrl, { headers })
     ).json()) as { capabilities: { branchSearch: boolean } };
 
-    expect({
-      capability: session.capabilities.branchSearch,
-      result: await response.json(),
-      status: response.status,
-    }).toEqual({ capability: true, result, status: 200 });
+    expect(session.capabilities.branchSearch).toBe(true);
+    expect(await response.json()).toEqual(result);
+    expect(response.status).toBe(200);
     expect(searchBranches).toHaveBeenCalledWith({
       worktreeId: 'worktree_0123456789abcdef0123456789abcdef',
       query: 'feature',
@@ -384,15 +383,7 @@ describe('protocol HTTP dispatch', () => {
       }),
     });
 
-    expect({ body: await response.json(), status: response.status }).toEqual({
-      body: {
-        error: {
-          code: 'internal_error',
-          message: 'The protocol handler returned an invalid response.',
-        },
-      },
-      status: 500,
-    });
+    await expectInvalidHandlerResponse(response);
   });
 
   it('dispatches one validated Product Command and returns its receipt', async () => {
@@ -622,15 +613,7 @@ describe('protocol HTTP dispatch', () => {
       operationId: 'operation_44444444444444444444444444444444',
     });
 
-    expect({ body: await response.json(), status: response.status }).toEqual({
-      body: {
-        error: {
-          code: 'internal_error',
-          message: 'The protocol handler returned an invalid response.',
-        },
-      },
-      status: 500,
-    });
+    await expectInvalidHandlerResponse(response);
   });
 
   it('rejects a fabricated native target that was not issued by the snapshot', async () => {
@@ -651,16 +634,8 @@ describe('protocol HTTP dispatch', () => {
       targetId: 'native_99999999999999999999999999999999',
     });
 
-    expect({
-      result: await response.json(),
-      status: response.status,
-    }).toEqual({
-      result: {
-        error: {
-          code: 'stale_target',
-          message: 'The native target is stale or does not allow this action.',
-        },
-      },
+    expect({ result: await response.json(), status: response.status }).toEqual({
+      result: staleTargetResponse,
       status: 409,
     });
     expect(perform).not.toHaveBeenCalled();
@@ -668,11 +643,13 @@ describe('protocol HTTP dispatch', () => {
 
   it('rejects an action that was not issued for the native target', async () => {
     const targetId = 'native_77777777777777777777777777777777';
+    let duplicate = false;
     const perform = vi.fn(() => ({ kind: 'performed' as const }));
     const server = await startLoopbackServer({
       allowedOrigins: ['null'],
       handlers: {
-        snapshot: () => nativeSnapshot(targetId, ['copy_relative_path']),
+        snapshot: () =>
+          nativeSnapshot(targetId, ['copy_relative_path'], duplicate),
         nativeActions: perform,
       },
     });
@@ -685,15 +662,16 @@ describe('protocol HTTP dispatch', () => {
     });
 
     expect({ result: await response.json(), status: response.status }).toEqual({
-      result: {
-        error: {
-          code: 'stale_target',
-          message: 'The native target is stale or does not allow this action.',
-        },
-      },
+      result: staleTargetResponse,
       status: 409,
     });
     expect(perform).not.toHaveBeenCalled();
+
+    duplicate = true;
+    const duplicateResponse = await fetch(endpointUrl(server, 'snapshot'), {
+      headers,
+    });
+    await expectInvalidHandlerResponse(duplicateResponse);
   });
 
   it('performs an allow-listed native action against its exact opaque target', async () => {
@@ -775,9 +753,24 @@ function postJson(
   });
 }
 
+async function expectInvalidHandlerResponse(response: Response) {
+  const body = await response.json();
+  expect({ body, status: response.status }).toEqual({
+    body: {
+      error: {
+        code: 'internal_error',
+        message: 'The protocol handler returned an invalid response.',
+      },
+    },
+    status: 500,
+  });
+  return body;
+}
+
 function nativeSnapshot(
   targetId: string,
   actions: readonly string[],
+  duplicate = false,
 ): ReturnType<typeof repositorySnapshotSchema.parse> {
   return repositorySnapshotSchema.parse({
     repositoryId: 'repository_99999999999999999999999999999999',
@@ -795,7 +788,10 @@ function nativeSnapshot(
         indexTree: null,
         status: { kind: 'clean' },
         changes: [],
-        nativeTargets: [{ targetId, actions }],
+        nativeTargets: [
+          { targetId, actions },
+          ...(duplicate ? [{ targetId, actions }] : []),
+        ],
       },
     ],
     remotes: [],

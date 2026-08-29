@@ -66,10 +66,14 @@ export interface ProtocolDispatchResponse {
 }
 
 const defaultResponseBodyBytes = PROTOCOL_LIMITS.diffOutputBytes;
-const diffResponseBodyBytes = PROTOCOL_LIMITS.diffOutputBytes * 6 + 16_384;
+const boundedEnvelope = (textBytes: number) =>
+  defaultResponseBodyBytes + textBytes * 6;
+const branchResponseBodyBytes = boundedEnvelope(5_000 * 1_024);
+const diffResponseBodyBytes = boundedEnvelope(PROTOCOL_LIMITS.diffOutputBytes);
+const snapshotResponseBodyBytes = boundedEnvelope(2_000 * 4_096);
 
 export const PROTOCOL_ENDPOINTS = {
-  branches: { method: 'POST', responseBodyBytes: defaultResponseBodyBytes },
+  branches: { method: 'POST', responseBodyBytes: branchResponseBodyBytes },
   commands: { method: 'POST', responseBodyBytes: defaultResponseBodyBytes },
   diff: { method: 'POST', responseBodyBytes: diffResponseBodyBytes },
   draft: { method: 'PUT', responseBodyBytes: defaultResponseBodyBytes },
@@ -80,7 +84,7 @@ export const PROTOCOL_ENDPOINTS = {
   },
   operations: { method: 'POST', responseBodyBytes: defaultResponseBodyBytes },
   session: { method: 'GET', responseBodyBytes: defaultResponseBodyBytes },
-  snapshot: { method: 'GET', responseBodyBytes: defaultResponseBodyBytes },
+  snapshot: { method: 'GET', responseBodyBytes: snapshotResponseBodyBytes },
 } as const;
 
 export type ProtocolEndpoint = keyof typeof PROTOCOL_ENDPOINTS;
@@ -160,7 +164,9 @@ export function createProtocolDispatcher(
           await handlers.snapshot(),
         );
         if (!snapshot.success) return invalidHandlerResponse();
-        issuedNativeActions = collectNativeActions(snapshot.data);
+        const nativeActions = collectNativeActions(snapshot.data);
+        if (nativeActions === undefined) return invalidHandlerResponse();
+        issuedNativeActions = nativeActions;
         return { status: 200, value: snapshot.data };
       }
       if (endpoint === 'diff' && handlers.diff !== undefined) {
@@ -296,7 +302,7 @@ export function createProtocolDispatcher(
 
 function collectNativeActions(
   snapshot: RepositorySnapshot,
-): Map<NativeTargetId, Set<NativeActionKind>> {
+): Map<NativeTargetId, Set<NativeActionKind>> | undefined {
   const issued = new Map<NativeTargetId, Set<NativeActionKind>>();
   for (const worktree of snapshot.worktrees) {
     const descriptors = [
@@ -304,9 +310,8 @@ function collectNativeActions(
       ...worktree.changes.flatMap((change) => change.nativeTargets),
     ];
     for (const descriptor of descriptors) {
-      const actions = issued.get(descriptor.targetId) ?? new Set();
-      descriptor.actions.forEach((action) => actions.add(action));
-      issued.set(descriptor.targetId, actions);
+      if (issued.has(descriptor.targetId)) return undefined;
+      issued.set(descriptor.targetId, new Set(descriptor.actions));
     }
   }
   return issued;
