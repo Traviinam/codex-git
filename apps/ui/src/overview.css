@@ -1,0 +1,431 @@
+.repository-overview {
+  --surface: #151718;
+  --surface-raised: #1d2022;
+  --surface-muted: #24282a;
+  --border: #34393c;
+  --border-strong: #50585c;
+  --text: #f2f4f3;
+  --muted: #aeb6b3;
+  --accent: #7bd8a5;
+  --accent-strong: #a4e9c2;
+  --danger: #ffbaad;
+
+  min-height: 100vh;
+  padding: clamp(16px, 3vw, 36px);
+  color: var(--text);
+  background:
+    radial-gradient(
+      circle at top left,
+      rgb(53 102 75 / 22%),
+      transparent 30rem
+    ),
+    #0f1112;
+}
+
+.repository-overview h1,
+.repository-overview h2,
+.repository-overview h3,
+.repository-overview p,
+.repository-overview dl,
+.repository-overview dd {
+  margin: 0;
+}
+
+.repository-empty-state {
+  display: grid;
+  min-height: 100vh;
+  place-content: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.repository-empty-state .eyebrow {
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.repository-empty-state code,
+.repository-empty-state [role='status'] {
+  color: var(--muted);
+}
+
+.repository-overview button,
+.repository-overview input,
+.repository-overview textarea {
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface-muted);
+}
+
+.repository-overview button {
+  min-height: 38px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.repository-overview button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: #2a302d;
+}
+
+.repository-overview button:disabled {
+  color: #8f9693;
+  cursor: not-allowed;
+  opacity: 0.75;
+}
+
+.repository-overview :focus-visible {
+  outline: 3px solid var(--accent-strong);
+  outline-offset: 3px;
+}
+
+.repository-header {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.5fr) minmax(360px, 2fr) auto;
+  gap: 24px;
+  align-items: center;
+  max-width: 1500px;
+  margin: 0 auto 20px;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgb(21 23 24 / 92%);
+  box-shadow: 0 18px 60px rgb(0 0 0 / 22%);
+}
+
+.repository-header .eyebrow {
+  margin-bottom: 5px;
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.repository-header h1 {
+  overflow: hidden;
+  font-size: clamp(1.5rem, 3vw, 2.35rem);
+  line-height: 1.05;
+  text-overflow: ellipsis;
+}
+
+.repository-header h1 + p,
+.worktree-detail h2 + p {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+}
+
+.repository-header dl {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(90px, 1fr));
+  gap: 8px;
+}
+
+.repository-header dl > div,
+.worktree-detail dl > div {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-raised);
+}
+
+.repository-header dt,
+.worktree-detail dt {
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.repository-header dd,
+.worktree-detail dd {
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.repository-header > div:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.repository-header > div:last-child button:first-child {
+  border-color: #43805d;
+  background: #224530;
+}
+
+.overview-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 350px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+  max-width: 1500px;
+  margin: 0 auto;
+}
+
+.overview-layout--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.worktree-navigator,
+.worktree-detail {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgb(21 23 24 / 94%);
+  box-shadow: 0 18px 60px rgb(0 0 0 / 18%);
+}
+
+.worktree-navigator {
+  position: sticky;
+  top: 18px;
+  max-height: calc(100vh - 36px);
+  padding: 14px;
+  overflow: auto;
+}
+
+.worktree-navigator > label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.worktree-navigator input {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 11px;
+}
+
+.worktree-navigator ul {
+  display: grid;
+  gap: 7px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.worktree-navigator li button {
+  display: grid;
+  width: 100%;
+  gap: 3px;
+  padding: 11px;
+  text-align: left;
+}
+
+.worktree-navigator li button[aria-current='true'] {
+  border-color: var(--accent);
+  background: #20382a;
+  box-shadow: inset 3px 0 var(--accent);
+}
+
+.worktree-navigator li span {
+  overflow: hidden;
+  font-weight: 750;
+  text-overflow: ellipsis;
+}
+
+.worktree-navigator li small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+}
+
+.worktree-navigator li small:first-of-type {
+  white-space: nowrap;
+}
+
+.worktree-navigator > p {
+  padding: 24px 8px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.worktree-detail {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+  padding: clamp(18px, 3vw, 30px);
+}
+
+.worktree-detail > p:first-child {
+  width: fit-content;
+  padding: 4px 8px;
+  border: 1px solid #3c7152;
+  border-radius: 999px;
+  color: var(--accent-strong);
+  background: #1e3928;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.worktree-detail h2 {
+  margin-top: -12px;
+  font-size: clamp(1.55rem, 3vw, 2.5rem);
+}
+
+.worktree-detail dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.worktree-detail > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.worktree-detail label {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.worktree-detail textarea {
+  width: 100%;
+  min-height: 112px;
+  padding: 12px;
+  resize: vertical;
+}
+
+.worktree-detail > section {
+  min-height: 130px;
+  padding: 18px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 11px;
+  background: var(--surface-raised);
+}
+
+.worktree-detail > section h3 {
+  margin-bottom: 8px;
+}
+
+.worktree-detail > section p {
+  color: var(--muted);
+}
+
+.selection-notice {
+  position: fixed;
+  z-index: 2;
+  right: 24px;
+  bottom: 24px;
+  max-width: 420px;
+  padding: 12px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 9px;
+  color: var(--text);
+  background: #20382a;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 35%);
+}
+
+@media (max-width: 1100px) {
+  .repository-header {
+    grid-template-columns: 1fr auto;
+  }
+
+  .repository-header dl {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .worktree-detail dl {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .repository-overview {
+    padding: 10px;
+  }
+
+  .repository-header,
+  .overview-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .repository-header {
+    gap: 16px;
+    padding: 16px;
+  }
+
+  .repository-header dl {
+    grid-column: auto;
+    grid-row: auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .repository-header dl > div:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .repository-header > div:last-child {
+    justify-content: stretch;
+  }
+
+  .repository-header > div:last-child button {
+    flex: 1;
+  }
+
+  .worktree-navigator {
+    position: static;
+    max-height: 44vh;
+  }
+
+  .worktree-detail {
+    padding: 17px;
+  }
+
+  .worktree-detail dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (prefers-color-scheme: light) {
+  .repository-overview {
+    --surface: #f8faf9;
+    --surface-raised: #ffffff;
+    --surface-muted: #eef2f0;
+    --border: #d4dbd7;
+    --border-strong: #aab7b0;
+    --text: #17201b;
+    --muted: #56635d;
+    --accent: #167144;
+    --accent-strong: #0a6337;
+
+    background:
+      radial-gradient(
+        circle at top left,
+        rgb(66 154 104 / 16%),
+        transparent 30rem
+      ),
+      #edf1ef;
+  }
+
+  .repository-header,
+  .worktree-navigator,
+  .worktree-detail {
+    background: rgb(248 250 249 / 96%);
+  }
+
+  .repository-header > div:last-child button:first-child,
+  .worktree-navigator li button[aria-current='true'],
+  .selection-notice {
+    color: #123e28;
+    background: #d9f1e3;
+  }
+}
