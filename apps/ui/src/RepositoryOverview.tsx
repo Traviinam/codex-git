@@ -17,21 +17,61 @@ export function RepositoryOverview({
     store.getSnapshot,
   );
   const worktreeButtons = useRef(new Map<string, HTMLButtonElement>());
+  const searchInput = useRef<HTMLInputElement>(null);
+  const worktreeTitle = useRef<HTMLHeadingElement>(null);
+  const handledFocusRecovery = useRef(0);
+  const orderedWorktrees =
+    state.source.kind === 'repository'
+      ? [...state.source.snapshot.worktrees].sort(compareWorktrees)
+      : [];
+  const normalizedQuery = state.searchQuery.trim().toLocaleLowerCase();
+  const visibleWorktrees = orderedWorktrees.filter((worktree) =>
+    matchesSearch(worktree, normalizedQuery),
+  );
+  const rovingWorktreeId =
+    visibleWorktrees.find(
+      (worktree) => worktree.worktreeId === state.selectedWorktreeId,
+    )?.worktreeId ??
+    visibleWorktrees[0]?.worktreeId ??
+    null;
 
   useEffect(() => {
-    if (state.shouldRecoverWorktreeFocus && state.selectedWorktreeId !== null) {
-      worktreeButtons.current.get(state.selectedWorktreeId)?.focus();
+    if (handledFocusRecovery.current === state.focusRecoveryRevision) return;
+    handledFocusRecovery.current = state.focusRecoveryRevision;
+    const visibleButton =
+      rovingWorktreeId === null
+        ? undefined
+        : worktreeButtons.current.get(rovingWorktreeId);
+    if (visibleButton !== undefined) {
+      visibleButton.focus();
+      return;
     }
-  }, [state.selectedWorktreeId, state.shouldRecoverWorktreeFocus]);
+    if (searchInput.current !== null) {
+      searchInput.current.focus();
+      return;
+    }
+    worktreeTitle.current?.focus();
+  }, [rovingWorktreeId, state.focusRecoveryRevision]);
 
   if (state.source.kind === 'loading') {
     return (
       <main className="repository-overview repository-empty-state">
         <p className="eyebrow">Git workspace</p>
-        <h1>Codex Git</h1>
-        <p aria-live="polite" role="status">
-          {state.source.message}
-        </p>
+        <h1 ref={worktreeTitle} tabIndex={-1}>
+          Codex Git
+        </h1>
+        {state.selectionNotice === null ? (
+          <p aria-live="polite" role="status">
+            {state.source.message}
+          </p>
+        ) : (
+          <>
+            <p>{state.source.message}</p>
+            <p aria-live="polite" role="status">
+              {state.selectionNotice}
+            </p>
+          </>
+        )}
       </main>
     );
   }
@@ -40,9 +80,16 @@ export function RepositoryOverview({
     return (
       <main className="repository-overview repository-empty-state">
         <p className="eyebrow">Current Project</p>
-        <h1>No Git Repository</h1>
+        <h1 ref={worktreeTitle} tabIndex={-1}>
+          No Git Repository
+        </h1>
         <p>{state.source.message}</p>
         <code>{state.source.projectPath}</code>
+        {state.selectionNotice === null ? null : (
+          <p aria-live="polite" role="status">
+            {state.selectionNotice}
+          </p>
+        )}
       </main>
     );
   }
@@ -54,11 +101,6 @@ export function RepositoryOverview({
   const unavailableCount = snapshot.worktrees.filter(
     (worktree) => worktree.status.kind === 'unavailable',
   ).length;
-  const orderedWorktrees = [...snapshot.worktrees].sort(compareWorktrees);
-  const normalizedQuery = state.searchQuery.trim().toLocaleLowerCase();
-  const visibleWorktrees = orderedWorktrees.filter((worktree) =>
-    matchesSearch(worktree, normalizedQuery),
-  );
 
   return (
     <main className="repository-overview">
@@ -137,6 +179,7 @@ export function RepositoryOverview({
             <label>
               Search Worktrees
               <input
+                ref={searchInput}
                 type="search"
                 value={state.searchQuery}
                 onChange={(event) =>
@@ -164,9 +207,7 @@ export function RepositoryOverview({
                         );
                       }
                     }}
-                    tabIndex={
-                      worktree.worktreeId === state.selectedWorktreeId ? 0 : -1
-                    }
+                    tabIndex={worktree.worktreeId === rovingWorktreeId ? 0 : -1}
                     type="button"
                     onClick={() => store.selectWorktree(worktree.worktreeId)}
                     onKeyDown={(event) => {
@@ -192,6 +233,9 @@ export function RepositoryOverview({
                     <small>{headLabel(worktree.head)}</small>
                     <small>{statusLabel(worktree.status)}</small>
                     <small>{upstreamLabel(worktree.upstream)}</small>
+                    {worktree.transition === undefined ? null : (
+                      <small>{transitionLabel(worktree.transition)}</small>
+                    )}
                   </button>
                 </li>
               ))}
@@ -203,15 +247,19 @@ export function RepositoryOverview({
         ) : null}
 
         {selected === undefined ? (
-          <section>
-            <h2>No Worktrees available</h2>
+          <section className="worktree-detail">
+            <h2 id="worktree-title" ref={worktreeTitle} tabIndex={-1}>
+              No Worktrees available
+            </h2>
           </section>
         ) : (
           <section aria-labelledby="worktree-title" className="worktree-detail">
             <p>
               {selected.role === 'main' ? 'Main Worktree' : 'Linked Worktree'}
             </p>
-            <h2 id="worktree-title">{selected.displayName}</h2>
+            <h2 id="worktree-title" ref={worktreeTitle} tabIndex={-1}>
+              {selected.displayName}
+            </h2>
             <p>{selected.path}</p>
             <dl>
               <div>
@@ -223,6 +271,12 @@ export function RepositoryOverview({
                 <dd>{upstreamLabel(selected.upstream)}</dd>
               </div>
               <div>
+                <dt>Upstream freshness</dt>
+                <dd aria-live="polite">
+                  {upstreamFreshnessLabel(selected.upstream)}
+                </dd>
+              </div>
+              <div>
                 <dt>Status</dt>
                 <dd>{statusLabel(selected.status)}</dd>
               </div>
@@ -230,6 +284,14 @@ export function RepositoryOverview({
                 <dt>Worktree observation</dt>
                 <dd>{refreshLabel(selected.freshness)}</dd>
               </div>
+              {selected.transition === undefined ? null : (
+                <div>
+                  <dt>Transition</dt>
+                  <dd aria-live="polite">
+                    {transitionLabel(selected.transition)}
+                  </dd>
+                </div>
+              )}
             </dl>
             <div>
               <button
@@ -367,6 +429,15 @@ function upstreamLabel(
   return upstream.reason;
 }
 
+function upstreamFreshnessLabel(
+  upstream: import('./repository-overview-model.js').UpstreamOverview,
+): string {
+  if (upstream.kind === 'not-applicable') return upstream.reason;
+  return upstream.fetchedAt === null
+    ? 'No successful Fetch recorded'
+    : `Cached from Fetch ${formatTime(upstream.fetchedAt)}`;
+}
+
 function statusLabel(status: WorktreeOverviewSnapshot['status']): string {
   switch (status.kind) {
     case 'clean':
@@ -396,11 +467,17 @@ function operationLabel(
     .map((operation) => {
       const category = operation.category.replace('_', ' ');
       const label = `${category[0]?.toLocaleUpperCase() ?? ''}${category.slice(1)}`;
-      const progress =
-        operation.progress === null
-          ? ''
-          : ` · ${Math.round(operation.progress * 100)}%`;
-      return `${label} ${operation.phase}${progress}`;
+      return `${label} ${operation.phase}${progressLabel(operation.progress)}`;
     })
     .join(', ');
+}
+
+function transitionLabel(
+  transition: NonNullable<WorktreeOverviewSnapshot['transition']>,
+): string {
+  return `${transition.label}${progressLabel(transition.progress)}`;
+}
+
+function progressLabel(progress: number | null): string {
+  return progress === null ? '' : ` · ${Math.round(progress * 100)}%`;
 }

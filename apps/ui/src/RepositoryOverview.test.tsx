@@ -18,6 +18,8 @@ describe('Repository overview', () => {
     expect(markup).toContain('Main Worktree');
     expect(markup).toContain('Local Branch main');
     expect(markup).toContain('<dt>Upstream</dt><dd>origin/main');
+    expect(markup).toContain('<dt>Upstream freshness</dt>');
+    expect(markup).toContain('Cached from Fetch Aug 29, 2026, 2:03 PM');
     expect(markup).toContain('Clean');
     expect(markup).toContain('Refresh codex-git locally');
     expect(markup).toContain('Fetch origin for codex-git');
@@ -134,6 +136,77 @@ describe('Repository overview', () => {
     expect(store.getSnapshot().selectedFileId).toBeNull();
     expect(store.getSnapshot().selectionNotice).toContain(
       'Branch or HEAD changed',
+    );
+  });
+
+  it('retains file selection when the selected Local Branch advances', () => {
+    const fixture = createOverviewFixture('one-worktree');
+    const store = createRepositoryStore(fixture.source);
+    const fileId = fileIdSchema.parse('file_00000000000000000000000000000002');
+    store.selectFile(fileId);
+    const state = fixture.source.getSnapshot();
+    if (state.kind !== 'repository')
+      throw new Error('Expected Repository fixture');
+    fixture.publish({
+      kind: 'repository',
+      snapshot: {
+        ...state.snapshot,
+        repositoryRevision: state.snapshot.repositoryRevision + 1,
+        worktrees: state.snapshot.worktrees.map((worktree) => ({
+          ...worktree,
+          head:
+            worktree.head.kind === 'local_branch'
+              ? {
+                  ...worktree.head,
+                  objectId: 'abcdef0123456789abcdef0123456789abcdef01',
+                }
+              : worktree.head,
+        })),
+      },
+    });
+
+    expect(store.getSnapshot().selectedFileId).toBe(fileId);
+    expect(store.getSnapshot().selectionNotice).toBeNull();
+  });
+
+  it('shows a Worktree transition with truthful progress in navigator and detail', () => {
+    const fixture = createOverviewFixture('many-worktrees');
+    const source = fixture.source.getSnapshot();
+    if (source.kind !== 'repository')
+      throw new Error('Expected Repository fixture');
+    fixture.publish({
+      kind: 'repository',
+      snapshot: {
+        ...source.snapshot,
+        worktrees: source.snapshot.worktrees.map((worktree) =>
+          worktree.displayName === 'agent-beta'
+            ? {
+                ...worktree,
+                transition: { label: 'Switching Branch', progress: 0.5 },
+              }
+            : worktree,
+        ),
+      },
+    });
+    const store = createRepositoryStore(fixture.source);
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository')
+      throw new Error('Expected Repository fixture');
+    const transitioning = current.snapshot.worktrees.find(
+      (worktree) => worktree.displayName === 'agent-beta',
+    );
+    if (transitioning === undefined)
+      throw new Error('Missing transitioning Worktree');
+    store.selectWorktree(transitioning.worktreeId);
+
+    const markup = renderToStaticMarkup(<App store={store} />);
+
+    expect(markup).toContain('<small>Switching Branch · 50%</small>');
+    expect(markup).not.toContain(
+      '<small aria-live="polite">Switching Branch · 50%</small>',
+    );
+    expect(markup).toContain(
+      '<dt>Transition</dt><dd aria-live="polite">Switching Branch · 50%</dd>',
     );
   });
 });

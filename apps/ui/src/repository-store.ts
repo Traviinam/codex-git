@@ -14,12 +14,14 @@ export interface RepositoryStoreSnapshot {
   readonly commitDrafts: Readonly<Record<string, string>>;
   readonly selectedFileId: FileId | null;
   readonly selectionNotice: string | null;
-  readonly shouldRecoverWorktreeFocus: boolean;
+  readonly focusRecoveryRevision: number;
 }
 
 export interface RepositoryStore {
   getSnapshot(): RepositoryStoreSnapshot;
   subscribe(listener: () => void): () => void;
+  /** Releases the source subscription. The caller that creates a store owns this idempotent lifecycle. */
+  dispose(): void;
   selectWorktree(worktreeId: WorktreeId): void;
   setSearchQuery(query: string): void;
   setCommitDraft(worktreeId: WorktreeId, draft: string): void;
@@ -38,21 +40,23 @@ export function createRepositoryStore(
   const initialWorktree = selectInitialWorktree(sourceState);
   let selectedWorktreeId = initialWorktree?.worktreeId ?? null;
   let selectedGeneration = initialWorktree?.generation ?? null;
-  let selectedHeadKey = headKey(initialWorktree);
+  let selectedHeadKey = headSelectionKey(initialWorktree);
   let searchQuery = '';
   let commitDrafts: Readonly<Record<string, string>> = {};
   let selectedFileId: FileId | null = null;
   let selectionNotice: string | null = null;
-  let shouldRecoverWorktreeFocus = false;
+  let focusRecoveryRevision = 0;
   let storeSnapshot = buildSnapshot();
+  let disposed = false;
 
-  source.subscribe(() => {
+  const unsubscribeSource = source.subscribe(() => {
+    if (disposed) return;
     const nextSource = source.getSnapshot();
     const selected = findWorktree(nextSource, selectedWorktreeId);
     const identityChanged =
       selected === null || selected.generation !== selectedGeneration;
     const branchChanged =
-      selected !== null && headKey(selected) !== selectedHeadKey;
+      selected !== null && headSelectionKey(selected) !== selectedHeadKey;
 
     sourceState = nextSource;
     if (identityChanged) {
@@ -60,7 +64,7 @@ export function createRepositoryStore(
       const previousSelection = selectedWorktreeId;
       selectedWorktreeId = replacement?.worktreeId ?? null;
       selectedGeneration = replacement?.generation ?? null;
-      selectedHeadKey = headKey(replacement);
+      selectedHeadKey = headSelectionKey(replacement);
       selectedFileId = null;
       selectionNotice =
         previousSelection === null
@@ -68,16 +72,14 @@ export function createRepositoryStore(
           : replacement === undefined
             ? 'The selected Worktree is no longer available.'
             : `The selected Worktree changed. ${replacement.displayName} is now selected.`;
-      shouldRecoverWorktreeFocus = replacement !== undefined;
+      if (previousSelection !== null) focusRecoveryRevision += 1;
     } else if (branchChanged) {
-      selectedHeadKey = headKey(selected);
+      selectedHeadKey = headSelectionKey(selected);
       selectedFileId = null;
       selectionNotice =
         'Branch or HEAD changed; the previous file selection was cleared.';
-      shouldRecoverWorktreeFocus = false;
     } else {
       selectionNotice = null;
-      shouldRecoverWorktreeFocus = false;
     }
     emit();
   });
@@ -85,39 +87,53 @@ export function createRepositoryStore(
   return {
     getSnapshot: () => storeSnapshot,
     subscribe(listener) {
+      if (disposed) return () => undefined;
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      listeners.clear();
+      unsubscribeSource();
+    },
     selectWorktree(worktreeId) {
+      if (disposed) return;
       const worktree = findWorktree(sourceState, worktreeId);
       if (worktree === null || worktree.worktreeId === selectedWorktreeId) {
         return;
       }
       selectedWorktreeId = worktree.worktreeId;
       selectedGeneration = worktree.generation;
-      selectedHeadKey = headKey(worktree);
+      selectedHeadKey = headSelectionKey(worktree);
       selectedFileId = null;
       selectionNotice = null;
-      shouldRecoverWorktreeFocus = false;
       emit();
     },
     setSearchQuery(query) {
+      if (disposed) return;
       if (query === searchQuery) return;
       searchQuery = query;
       emit();
     },
     setCommitDraft(worktreeId, draft) {
+      if (disposed) return;
       if (commitDrafts[worktreeId] === draft) return;
       commitDrafts = { ...commitDrafts, [worktreeId]: draft };
       emit();
     },
     selectFile(fileId) {
+      if (disposed) return;
       if (selectedFileId === fileId) return;
       selectedFileId = fileId;
       emit();
     },
-    requestRefresh: () => source.requestRefresh(),
-    requestFetch: (remoteId) => source.requestFetch(remoteId),
+    requestRefresh: () => {
+      if (!disposed) source.requestRefresh();
+    },
+    requestFetch: (remoteId) => {
+      if (!disposed) source.requestFetch(remoteId);
+    },
   };
 
   function buildSnapshot(): RepositoryStoreSnapshot {
@@ -128,7 +144,7 @@ export function createRepositoryStore(
       commitDrafts,
       selectedFileId,
       selectionNotice,
-      shouldRecoverWorktreeFocus,
+      focusRecoveryRevision,
     };
   }
 
@@ -160,11 +176,13 @@ function selectInitialWorktree(
   );
 }
 
-function headKey(worktree: WorktreeOverviewSnapshot | null | undefined) {
+function headSelectionKey(
+  worktree: WorktreeOverviewSnapshot | null | undefined,
+) {
   if (worktree === null || worktree === undefined) return null;
   if (worktree.head.kind === 'initial') return 'initial';
   if (worktree.head.kind === 'detached') {
     return `detached:${worktree.head.objectId}`;
   }
-  return `local_branch:${worktree.head.displayName}:${worktree.head.objectId}`;
+  return `local_branch:${worktree.head.displayName}`;
 }

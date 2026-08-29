@@ -2,7 +2,7 @@
 
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from './overview.js';
 import { createOverviewFixture } from './overview-fixtures.js';
@@ -49,6 +49,159 @@ describe('Repository overview interactions', () => {
     expect(alpha.tabIndex).toBe(0);
     expect(main.tabIndex).toBe(-1);
   });
+
+  it('keeps filtered results keyboard reachable without replacing the selected detail', () => {
+    const fixture = createOverviewFixture('many-worktrees');
+    const store = createRepositoryStore(fixture.source);
+    act(() => root.render(<App store={store} />));
+    const search = container.querySelector('input[type="search"]');
+    if (!(search instanceof HTMLInputElement))
+      throw new Error('Missing search');
+
+    setInput(search, 'agent-alpha');
+    const alpha = button(
+      'Select agent-alpha Worktree at /private/tmp/codex-git-agent-alpha',
+    );
+    expect(alpha.tabIndex).toBe(0);
+    expect(container.querySelector('#worktree-title')?.textContent).toBe(
+      'codex-git',
+    );
+
+    act(() => alpha.click());
+    setInput(search, 'worktree-');
+    const firstVisible = button(
+      'Select worktree-04 Worktree at /private/tmp/codex-git-worktree-04',
+    );
+    expect(firstVisible.tabIndex).toBe(0);
+    search.focus();
+
+    const source = fixture.source.getSnapshot();
+    if (source.kind !== 'repository')
+      throw new Error('Expected Repository fixture');
+    act(() => {
+      fixture.publish({
+        kind: 'repository',
+        snapshot: {
+          ...source.snapshot,
+          repositoryRevision: source.snapshot.repositoryRevision + 1,
+          topologyRevision: source.snapshot.topologyRevision + 1,
+          worktrees: source.snapshot.worktrees.filter(
+            (worktree) => worktree.displayName !== 'agent-alpha',
+          ),
+        },
+      });
+    });
+
+    expect(document.activeElement).toBe(firstVisible);
+    expect(container.querySelector('#worktree-title')?.textContent).toBe(
+      'codex-git',
+    );
+
+    search.focus();
+    setInput(search, 'worktree-2');
+    expect(document.activeElement).toBe(search);
+  });
+
+  it('recovers focus to detail when Worktree removal collapses the navigator', () => {
+    const fixture = createOverviewFixture('unavailable-worktree');
+    const store = createRepositoryStore(fixture.source);
+    act(() => root.render(<App store={store} />));
+    const missing = button(
+      'Select missing-worktree Worktree at /private/tmp/missing-worktree',
+    );
+    act(() => missing.click());
+    missing.focus();
+
+    const source = fixture.source.getSnapshot();
+    if (source.kind !== 'repository')
+      throw new Error('Expected Repository fixture');
+    act(() => {
+      fixture.publish({
+        kind: 'repository',
+        snapshot: {
+          ...source.snapshot,
+          repositoryRevision: source.snapshot.repositoryRevision + 1,
+          topologyRevision: source.snapshot.topologyRevision + 1,
+          worktrees: source.snapshot.worktrees.filter(
+            (worktree) => worktree.displayName !== 'missing-worktree',
+          ),
+        },
+      });
+    });
+
+    const detailTitle = container.querySelector('#worktree-title');
+    expect(detailTitle?.textContent).toBe('codex-git');
+    expect(document.activeElement).toBe(detailTitle);
+  });
+
+  it('recovers focus to the empty state when the final Worktree disappears', () => {
+    const fixture = createOverviewFixture('one-worktree');
+    const store = createRepositoryStore(fixture.source);
+    act(() => root.render(<App store={store} />));
+    const selectedTitle = container.querySelector('#worktree-title');
+    if (!(selectedTitle instanceof HTMLHeadingElement))
+      throw new Error('Missing selected Worktree title');
+    selectedTitle.focus();
+
+    const source = fixture.source.getSnapshot();
+    if (source.kind !== 'repository')
+      throw new Error('Expected Repository fixture');
+    act(() => {
+      fixture.publish({
+        kind: 'repository',
+        snapshot: {
+          ...source.snapshot,
+          repositoryRevision: source.snapshot.repositoryRevision + 1,
+          topologyRevision: source.snapshot.topologyRevision + 1,
+          worktrees: [],
+        },
+      });
+    });
+
+    const emptyTitle = container.querySelector('#worktree-title');
+    expect(emptyTitle?.textContent).toBe('No Worktrees available');
+    expect(document.activeElement).toBe(emptyTitle);
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      'no longer available',
+    );
+  });
+
+  it.each([
+    [
+      'loading',
+      { kind: 'loading', message: 'Resolving another Current Project…' },
+      'Codex Git',
+    ],
+    [
+      'non-repository',
+      {
+        kind: 'non-repository',
+        projectPath: '/Users/leyoonafr/Downloads/notes',
+        message: 'The Current Project is not inside a Git Repository.',
+      },
+      'No Git Repository',
+    ],
+  ] as const)(
+    'recovers focus when the Repository becomes %s',
+    (_label, nextState, expectedTitle) => {
+      const fixture = createOverviewFixture('one-worktree');
+      const store = createRepositoryStore(fixture.source);
+      act(() => root.render(<App store={store} />));
+      const selectedTitle = container.querySelector('#worktree-title');
+      if (!(selectedTitle instanceof HTMLHeadingElement))
+        throw new Error('Missing selected Worktree title');
+      selectedTitle.focus();
+
+      act(() => fixture.publish(nextState));
+
+      const fallbackTitle = container.querySelector('h1');
+      expect(fallbackTitle?.textContent).toBe(expectedTitle);
+      expect(document.activeElement).toBe(fallbackTitle);
+      expect(container.textContent).toContain(
+        'The selected Worktree is no longer available.',
+      );
+    },
+  );
 
   it('preserves selection on harmless refresh and recovers focus when that generation disappears', () => {
     const fixture = createOverviewFixture('many-worktrees');
@@ -226,6 +379,18 @@ describe('Repository overview interactions', () => {
     expect(container.querySelector('[role="status"]')?.textContent).toContain(
       'Branch or HEAD changed',
     );
+  });
+
+  it('does not dispose a caller-owned store when the overview unmounts', () => {
+    const fixture = createOverviewFixture('one-worktree');
+    const store = createRepositoryStore(fixture.source);
+    const dispose = vi.spyOn(store, 'dispose');
+    act(() => root.render(<App store={store} />));
+
+    act(() => root.unmount());
+
+    expect(dispose).not.toHaveBeenCalled();
+    root = createRoot(container);
   });
 
   function button(accessibleName: string): HTMLButtonElement {
