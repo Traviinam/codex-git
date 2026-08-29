@@ -1,19 +1,15 @@
 import { z } from 'zod';
 
+import { revisionSchema } from './schemas.js';
 import {
+  clientCommandIdSchema,
   fileIdSchema,
   operationIdSchema,
   refIdSchema,
   remoteIdSchema,
   repositoryIdSchema,
-  revisionSchema,
   worktreeIdSchema,
-} from './schemas.js';
-
-export const clientCommandIdSchema = z
-  .string()
-  .regex(/^command_[0-9a-f]{32}$/u)
-  .brand<'ClientCommandId'>();
+} from './identifiers.js';
 
 const worktreeCommandBase = {
   worktreeId: worktreeIdSchema,
@@ -50,12 +46,21 @@ export const productCommandSchema = z.discriminatedUnion('kind', [
     repositoryId: repositoryIdSchema,
     expectedRefsRevision: revisionSchema,
   }),
-  z.strictObject({ kind: z.literal('pull'), ...worktreeCommandBase }),
-  z.strictObject({ kind: z.literal('push'), ...worktreeCommandBase }),
+  z.strictObject({
+    kind: z.literal('pull'),
+    ...worktreeCommandBase,
+    expectedRefsRevision: revisionSchema,
+  }),
+  z.strictObject({
+    kind: z.literal('push'),
+    ...worktreeCommandBase,
+    expectedRefsRevision: revisionSchema,
+  }),
   z.strictObject({
     kind: z.literal('publish'),
     ...worktreeCommandBase,
     remoteId: remoteIdSchema,
+    expectedRefsRevision: revisionSchema,
   }),
   z.strictObject({
     kind: z.literal('cancel_operation'),
@@ -72,6 +77,5 @@ export const commandEnvelopeSchema = z.strictObject({
   command: productCommandSchema,
 });
 
-export type ClientCommandId = z.infer<typeof clientCommandIdSchema>;
 export type ProductCommand = z.infer<typeof productCommandSchema>;
 export type CommandEnvelope = z.infer<typeof commandEnvelopeSchema>;

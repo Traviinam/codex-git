@@ -1,9 +1,42 @@
 import { z } from 'zod';
 
-import { clientCommandIdSchema } from './commands.js';
-import { operationIdSchema } from './schemas.js';
+import { clientCommandIdSchema, operationIdSchema } from './identifiers.js';
 
 const messageSchema = z.string().min(1).max(8_192);
+
+export const operationFailureCodeSchema = z.enum([
+  'authentication',
+  'conflict',
+  'hook_rejected',
+  'invalid_remote',
+  'non_fast_forward',
+  'offline',
+  'permission',
+  'policy',
+  'process_failed',
+  'timeout',
+]);
+
+export const operationSuccessResultSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('no_change') }),
+  z.strictObject({
+    kind: z.literal('commit'),
+    shortObjectId: z.string().regex(/^[0-9a-f]{7,64}$/u),
+    summary: z.string().min(1).max(512),
+  }),
+  z.strictObject({
+    kind: z.literal('files'),
+    affectedCount: z.number().int().nonnegative(),
+  }),
+  z.strictObject({
+    kind: z.literal('branch_switch'),
+    displayName: z.string().min(1).max(1_024),
+  }),
+  z.strictObject({
+    kind: z.literal('remote'),
+    summary: z.string().min(1).max(512),
+  }),
+]);
 
 export const operationReceiptSchema = z.strictObject({
   operationId: operationIdSchema,
@@ -19,6 +52,7 @@ export const operationResultSchema = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('succeeded'),
     operationId: operationIdSchema,
+    result: operationSuccessResultSchema,
   }),
   z.strictObject({
     kind: z.literal('rejected'),
@@ -29,16 +63,7 @@ export const operationResultSchema = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('failed_known'),
     operationId: operationIdSchema,
-    code: z.enum([
-      'authentication',
-      'conflict',
-      'hook_rejected',
-      'offline',
-      'permission',
-      'policy',
-      'process_failed',
-      'timeout',
-    ]),
+    code: operationFailureCodeSchema,
     message: messageSchema,
   }),
   z.strictObject({
@@ -47,11 +72,18 @@ export const operationResultSchema = z.discriminatedUnion('kind', [
     message: messageSchema,
     effects: z
       .array(
-        z.strictObject({
-          label: z.string().min(1).max(256),
-          kind: z.enum(['succeeded', 'failed_known']),
-          message: messageSchema.optional(),
-        }),
+        z.discriminatedUnion('kind', [
+          z.strictObject({
+            label: z.string().min(1).max(256),
+            kind: z.literal('succeeded'),
+          }),
+          z.strictObject({
+            label: z.string().min(1).max(256),
+            kind: z.literal('failed_known'),
+            code: operationFailureCodeSchema,
+            message: messageSchema,
+          }),
+        ]),
       )
       .min(2)
       .max(1_000)

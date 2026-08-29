@@ -3,9 +3,9 @@ import { z } from 'zod';
 import {
   operationIdSchema,
   repositoryIdSchema,
-  revisionSchema,
   worktreeIdSchema,
-} from './schemas.js';
+} from './identifiers.js';
+import { revisionSchema } from './schemas.js';
 
 export const sseInvalidationSchema = z.discriminatedUnion('kind', [
   z.strictObject({

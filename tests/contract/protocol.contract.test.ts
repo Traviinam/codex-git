@@ -60,6 +60,15 @@ describe('protocol runtime schemas', () => {
     });
   });
 
+  it('does not reflect secret-shaped attacker input in validation errors', () => {
+    const result = parseProtocolPayload(sessionMetadataSchema, {
+      protocolVersion: PROTOCOL_VERSION,
+      'token=fixture-reflected-secret': true,
+    });
+
+    expect(JSON.stringify(result)).not.toContain('fixture-reflected-secret');
+  });
+
   it('accepts a stable structured protocol error response', () => {
     const result = protocolErrorResponseSchema.safeParse({
       error: {
@@ -84,9 +93,32 @@ describe('protocol runtime schemas', () => {
           worktreeId: 'worktree_0123456789abcdef0123456789abcdef',
           worktreeRevision: 7,
           generation: 'generation_0123456789abcdef0123456789abcdef',
+          freshness: { kind: 'current' },
           head: { kind: 'initial' },
           indexTree: null,
           status: { kind: 'clean' },
+          changes: [
+            {
+              fileId: 'file_0123456789abcdef0123456789abcdef',
+              kind: 'change',
+              baseline: 'index_to_working_tree',
+              displayPath: 'src/example.ts',
+              nativeTargets: [
+                {
+                  targetId: 'native_0123456789abcdef0123456789abcdef',
+                  actions: ['open_file_in_codex', 'copy_relative_path'],
+                },
+              ],
+            },
+          ],
+          nativeTargets: [],
+        },
+      ],
+      remotes: [
+        {
+          remoteId: 'remote_0123456789abcdef0123456789abcdef',
+          displayName: 'origin',
+          host: 'github.com',
         },
       ],
       operations: [],
@@ -180,6 +212,16 @@ describe('protocol runtime schemas', () => {
     expect(result.success).toBe(false);
   });
 
+  it('measures Commit Draft limits in UTF-8 bytes', () => {
+    const result = commitDraftUpdateSchema.safeParse({
+      worktreeId: 'worktree_0123456789abcdef0123456789abcdef',
+      expectedRevision: 2,
+      update: { kind: 'set', text: '€'.repeat(21_846) },
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   it('rejects executable names and Git arguments in a command request', () => {
     const result = commandEnvelopeSchema.safeParse({
       clientCommandId: 'command_0123456789abcdef0123456789abcdef',
@@ -196,6 +238,19 @@ describe('protocol runtime schemas', () => {
     expect(result.success).toBe(false);
   });
 
+  it('requires Pull to carry the observed refs revision', () => {
+    const result = commandEnvelopeSchema.safeParse({
+      clientCommandId: 'command_0123456789abcdef0123456789abcdef',
+      command: {
+        kind: 'pull',
+        worktreeId: 'worktree_0123456789abcdef0123456789abcdef',
+        expectedWorktreeRevision: 4,
+      },
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   it('accepts an Unknown Outcome that remains recoverable', () => {
     const result = operationResultSchema.safeParse({
       kind: 'unknown_outcome',
@@ -203,6 +258,39 @@ describe('protocol runtime schemas', () => {
       code: 'reconciliation_incomplete',
       message: 'The current Repository state cannot prove the outcome.',
       recoveryAvailable: true,
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts typed Commit evidence for a Succeeded outcome', () => {
+    const result = operationResultSchema.safeParse({
+      kind: 'succeeded',
+      operationId: 'operation_0123456789abcdef0123456789abcdef',
+      result: {
+        kind: 'commit',
+        shortObjectId: '0123456789ab',
+        summary: 'Commit created',
+      },
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('requires a typed failure code for failed Partial Success effects', () => {
+    const result = operationResultSchema.safeParse({
+      kind: 'partial_success',
+      operationId: 'operation_0123456789abcdef0123456789abcdef',
+      message: 'Some Remotes were fetched.',
+      effects: [
+        { kind: 'succeeded', label: 'origin' },
+        {
+          kind: 'failed_known',
+          label: 'backup',
+          code: 'offline',
+          message: 'The Remote is offline.',
+        },
+      ],
     });
 
     expect(result.success).toBe(true);
@@ -270,6 +358,16 @@ describe('diagnostic redaction', () => {
         'token=[REDACTED]',
         'launch=[REDACTED]',
       ].join('\n'),
+    );
+  });
+
+  it('removes common environment-style secret values', () => {
+    expect(
+      createDiagnosticRedactor()(
+        'NPM_TOKEN=fixture-npm GITHUB_TOKEN=fixture-github AWS_SECRET_ACCESS_KEY=fixture-aws',
+      ),
+    ).toBe(
+      'NPM_TOKEN=[REDACTED] GITHUB_TOKEN=[REDACTED] AWS_SECRET_ACCESS_KEY=[REDACTED]',
     );
   });
 });

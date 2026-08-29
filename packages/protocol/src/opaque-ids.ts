@@ -1,5 +1,5 @@
-import type { NativeTargetId } from './native-actions.js';
 import type {
+  NativeTargetId,
   FileId,
   OperationId,
   RefId,
@@ -7,7 +7,7 @@ import type {
   RepositoryId,
   WorktreeGeneration,
   WorktreeId,
-} from './schemas.js';
+} from './identifiers.js';
 
 export type OpaqueIdKind =
   | 'file'

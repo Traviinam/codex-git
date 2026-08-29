@@ -1,9 +1,17 @@
 import { z } from 'zod';
 
-export const nativeTargetIdSchema = z
-  .string()
-  .regex(/^native_[0-9a-f]{32}$/u)
-  .brand<'NativeTargetId'>();
+import { nativeTargetIdSchema } from './identifiers.js';
+
+export const nativeActionKindSchema = z.enum([
+  'open_terminal',
+  'reveal_in_finder',
+  'copy_absolute_path',
+  'copy_branch_or_sha',
+  'open_codex_context',
+  'open_file_in_codex',
+  'copy_relative_path',
+  'open_default_app',
+]);
 
 const target = { targetId: nativeTargetIdSchema } as const;
 
@@ -30,6 +38,6 @@ export const nativeActionResultSchema = z.discriminatedUnion('kind', [
   }),
 ]);
 
-export type NativeTargetId = z.infer<typeof nativeTargetIdSchema>;
+export type NativeActionKind = z.infer<typeof nativeActionKindSchema>;
 export type NativeActionRequest = z.infer<typeof nativeActionRequestSchema>;
 export type NativeActionResult = z.infer<typeof nativeActionResultSchema>;

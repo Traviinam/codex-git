@@ -1,22 +1,26 @@
 import { z } from 'zod';
 
+import {
+  fileIdSchema,
+  nativeTargetIdSchema,
+  operationIdSchema,
+  refIdSchema,
+  remoteIdSchema,
+  repositoryIdSchema,
+  worktreeGenerationSchema,
+  worktreeIdSchema,
+} from './identifiers.js';
+import { nativeActionKindSchema } from './native-actions.js';
+
 export const revisionSchema = z.number().int().nonnegative();
 const objectIdSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u);
 
-function opaqueIdSchema<const Prefix extends string>(prefix: Prefix) {
-  return z
-    .string()
-    .regex(new RegExp(`^${prefix}_[0-9a-f]{32}$`, 'u'))
-    .brand<`${Prefix}Id`>();
-}
-
-export const repositoryIdSchema = opaqueIdSchema('repository');
-export const worktreeIdSchema = opaqueIdSchema('worktree');
-export const worktreeGenerationSchema = opaqueIdSchema('generation');
-export const fileIdSchema = opaqueIdSchema('file');
-export const refIdSchema = opaqueIdSchema('ref');
-export const remoteIdSchema = opaqueIdSchema('remote');
-export const operationIdSchema = opaqueIdSchema('operation');
+const utf8ByteLength = (value: string) =>
+  new TextEncoder().encode(value).length;
+const utf8StringAtMost = (bytes: number) =>
+  z.string().refine((value) => utf8ByteLength(value) <= bytes, {
+    message: `String must contain at most ${bytes} UTF-8 bytes.`,
+  });
 
 export const diffRequestSchema = z.strictObject({
   fileId: fileIdSchema,
@@ -34,7 +38,7 @@ export const diffResultSchema = z.discriminatedUnion('kind', [
     kind: z.literal('text'),
     fileId: fileIdSchema,
     baseline: diffBaselineSchema,
-    content: z.string().max(2_097_152),
+    content: utf8StringAtMost(2_097_152),
     lineCount: z.number().int().nonnegative().max(20_000),
   }),
   z.strictObject({
@@ -85,7 +89,7 @@ export const commitDraftUpdateSchema = z.strictObject({
     z.strictObject({ kind: z.literal('clear') }),
     z.strictObject({
       kind: z.literal('set'),
-      text: z.string().max(65_536),
+      text: utf8StringAtMost(65_536),
     }),
   ]),
 });
@@ -93,7 +97,7 @@ export const commitDraftUpdateSchema = z.strictObject({
 export const commitDraftSchema = z.strictObject({
   worktreeId: worktreeIdSchema,
   revision: revisionSchema,
-  text: z.string().max(65_536),
+  text: utf8StringAtMost(65_536),
 });
 
 export const refreshStateSchema = z.discriminatedUnion('kind', [
@@ -157,13 +161,35 @@ export const operationSummarySchema = z.strictObject({
   progress: z.number().min(0).max(1).nullable(),
 });
 
+export const nativeTargetDescriptorSchema = z.strictObject({
+  targetId: nativeTargetIdSchema,
+  actions: z.array(nativeActionKindSchema).min(1).readonly(),
+});
+
+export const changedFileSchema = z.strictObject({
+  fileId: fileIdSchema,
+  kind: z.enum(['conflict', 'staged_change', 'change', 'untracked']),
+  baseline: diffBaselineSchema,
+  displayPath: z.string().min(1).max(4_096),
+  nativeTargets: z.array(nativeTargetDescriptorSchema).readonly(),
+});
+
+export const remoteSummarySchema = z.strictObject({
+  remoteId: remoteIdSchema,
+  displayName: z.string().min(1).max(256),
+  host: z.string().min(1).max(1_024),
+});
+
 export const worktreeSnapshotSchema = z.strictObject({
   worktreeId: worktreeIdSchema,
   worktreeRevision: revisionSchema,
   generation: worktreeGenerationSchema,
+  freshness: refreshStateSchema,
   head: headStateSchema,
   indexTree: objectIdSchema.nullable(),
   status: worktreeStatusSchema,
+  changes: z.array(changedFileSchema).max(2_000).readonly(),
+  nativeTargets: z.array(nativeTargetDescriptorSchema).readonly(),
 });
 
 export const repositorySnapshotSchema = z.strictObject({
@@ -173,16 +199,10 @@ export const repositorySnapshotSchema = z.strictObject({
   refsRevision: revisionSchema,
   refresh: refreshStateSchema,
   worktrees: z.array(worktreeSnapshotSchema).readonly(),
+  remotes: z.array(remoteSummarySchema).readonly(),
   operations: z.array(operationSummarySchema).readonly(),
 });
 
-export type RepositoryId = z.infer<typeof repositoryIdSchema>;
-export type WorktreeId = z.infer<typeof worktreeIdSchema>;
-export type WorktreeGeneration = z.infer<typeof worktreeGenerationSchema>;
-export type FileId = z.infer<typeof fileIdSchema>;
-export type RefId = z.infer<typeof refIdSchema>;
-export type RemoteId = z.infer<typeof remoteIdSchema>;
-export type OperationId = z.infer<typeof operationIdSchema>;
 export type DiffRequest = z.infer<typeof diffRequestSchema>;
 export type DiffResult = z.infer<typeof diffResultSchema>;
 export type BranchSearchRequest = z.infer<typeof branchSearchRequestSchema>;

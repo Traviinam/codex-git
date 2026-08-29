@@ -29,7 +29,7 @@ export function createDiagnosticRedactor(
       `$1$2${REDACTED}`,
     );
     redacted = redacted.replace(
-      /\b(token|access[_-]?token|refresh[_-]?token|password|passwd|secret|api[_-]?key|credential|client[_-]?secret)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;&]+)/giu,
+      /\b((?:[a-z][a-z0-9_-]*[_-])?(?:token|password|passwd|secret|api[_-]?key|credential|access[_-]?key)(?:[_-][a-z0-9_-]+)?)(\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;&]+)/giu,
       `$1$2${REDACTED}`,
     );
     redacted = redacted.replace(
