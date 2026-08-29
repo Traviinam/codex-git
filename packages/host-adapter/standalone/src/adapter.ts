@@ -21,6 +21,8 @@ class StandaloneHostConnection implements HostConnection {
     yield standaloneContext;
   }
 
+  async *transitions(): AsyncIterable<never> {}
+
   async perform(): Promise<NativeActionResult> {
     return { status: 'unsupported' };
   }

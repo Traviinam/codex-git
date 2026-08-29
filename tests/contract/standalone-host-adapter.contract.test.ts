@@ -15,6 +15,7 @@ describe('StandaloneHostAdapter contract', () => {
     const { connection } = result;
 
     const contexts = connection.contexts()[Symbol.asyncIterator]();
+    const transitions = connection.transitions()[Symbol.asyncIterator]();
 
     expect(await contexts.next()).toEqual({
       done: false,
@@ -23,6 +24,10 @@ describe('StandaloneHostAdapter contract', () => {
         task: null,
         theme: 'system',
       },
+    });
+    await expect(transitions.next()).resolves.toEqual({
+      done: true,
+      value: undefined,
     });
 
     await connection.close();

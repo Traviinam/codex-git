@@ -127,6 +127,8 @@ export class CodexHostConnection implements HostConnection {
     }
   }
 
+  async *transitions(): AsyncIterable<never> {}
+
   async perform(action: NativeHostAction): Promise<NativeActionResult> {
     if (this.closed) {
       return { status: 'rejected' };
