@@ -26,7 +26,10 @@ export interface DedicatedCodexProcess {
 
 export interface DedicatedCodexPlatform {
   createProfile(): Promise<string>;
-  readAppVersion(appPath: string): Promise<string>;
+  readAppIdentity(appPath: string): Promise<{
+    readonly build: string;
+    readonly version: string;
+  }>;
   spawn(executable: string, args: readonly string[]): DedicatedCodexProcess;
   readFile(path: string): Promise<string>;
   fetchJson(url: URL): Promise<unknown>;
@@ -35,6 +38,7 @@ export interface DedicatedCodexPlatform {
 }
 
 export interface DedicatedCodexInstance {
+  readonly build: string;
   readonly ownership: DedicatedCodexOwnership;
   readonly version: string;
   currentTarget(): Promise<DedicatedCodexTarget | null>;
@@ -60,7 +64,7 @@ export async function launchDedicatedCodexInstance(
   let process: DedicatedCodexProcess | null = null;
 
   try {
-    const version = await platform.readAppVersion(appPath);
+    const { build, version } = await platform.readAppIdentity(appPath);
     const executable = join(appPath, 'Contents', 'MacOS', 'ChatGPT');
     process = platform.spawn(executable, [
       `--user-data-dir=${profilePath}`,
@@ -82,6 +86,7 @@ export async function launchDedicatedCodexInstance(
 
     const instance = new OwnedDedicatedCodexInstance(
       ownership,
+      build,
       version,
       process,
       platform,
@@ -113,6 +118,7 @@ class OwnedDedicatedCodexInstance implements DedicatedCodexInstance {
 
   constructor(
     readonly ownership: DedicatedCodexOwnership,
+    readonly build: string,
     readonly version: string,
     private readonly process: DedicatedCodexProcess,
     private readonly platform: DedicatedCodexPlatform,
@@ -260,24 +266,19 @@ function parseOwnedTarget(
   }
 
   const parsed = { id: target.id, webSocketUrl: target.webSocketDebuggerUrl };
-  return isDedicatedCodexTargetOwned(parsed, {
-    endpoint: endpoint.href,
-    instanceId: '',
-    processId: 0,
-    profilePath: '',
-  })
+  return isDedicatedCodexTargetBoundToEndpoint(parsed, endpoint.href)
     ? parsed
     : null;
 }
 
-export function isDedicatedCodexTargetOwned(
+export function isDedicatedCodexTargetBoundToEndpoint(
   target: DedicatedCodexTarget,
-  ownership: DedicatedCodexOwnership,
+  endpointUrl: string,
 ): boolean {
   let endpoint: URL;
   let webSocketUrl: URL;
   try {
-    endpoint = new URL(ownership.endpoint);
+    endpoint = new URL(endpointUrl);
     webSocketUrl = new URL(target.webSocketUrl);
   } catch {
     return false;
@@ -298,13 +299,16 @@ export function isDedicatedCodexTargetOwned(
 
 const defaultPlatform: DedicatedCodexPlatform = {
   createProfile: () => mkdtemp(join(tmpdir(), 'codex-git-')),
-  readAppVersion: (appPath) =>
-    executeFile('/usr/bin/plutil', [
-      '-extract',
-      'CFBundleShortVersionString',
-      'raw',
-      join(appPath, 'Contents', 'Info.plist'),
-    ]),
+  async readAppIdentity(appPath) {
+    const plist = join(appPath, 'Contents', 'Info.plist');
+    const read = (key: string) =>
+      executeFile('/usr/bin/plutil', ['-extract', key, 'raw', plist]);
+    const [build, version] = await Promise.all([
+      read('CFBundleVersion'),
+      read('CFBundleShortVersionString'),
+    ]);
+    return { build, version };
+  },
   spawn(executable, args) {
     const child = spawn(executable, [...args], { stdio: 'ignore' });
     if (child.pid === undefined) {

@@ -29,6 +29,7 @@ describe('Codex runtime composition', () => {
 });
 
 class FixtureInstance implements DedicatedCodexInstance {
+  readonly build = '7119';
   closed = false;
   readonly ownership = {
     endpoint: 'http://127.0.0.1:43117/',

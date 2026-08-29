@@ -139,6 +139,7 @@ function ownedTarget(id: string): DedicatedCodexTarget {
 
 // prettier-ignore
 class FixtureInstance implements DedicatedCodexInstance {
+  readonly build = '7119';
   readonly ownership = ownership;
   readonly version = '26.820.60940';
   private readonly listeners = new Set<(target: DedicatedCodexTarget | null) => void>();

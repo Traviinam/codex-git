@@ -48,6 +48,7 @@ describe('dedicated Codex instance discovery', () => {
       processId: 4242,
       profilePath: '/private/tmp/codex-git-profile-42',
     });
+    expect(instance.build).toBe('7119');
     await expect(instance.currentTarget()).resolves.toEqual({
       id: 'owned-target',
       webSocketUrl: 'ws://127.0.0.1:43117/devtools/page/owned-target',
@@ -101,7 +102,9 @@ class FixturePlatform implements DedicatedCodexPlatform {
 
   constructor(private readonly targets: unknown, private emptyFetches = 0) {}
   async createProfile(): Promise<string> { return '/private/tmp/codex-git-profile-42'; }
-  async readAppVersion(): Promise<string> { return '26.820.60940'; }
+  async readAppIdentity(): Promise<{ build: string; version: string }> {
+    return { build: '7119', version: '26.820.60940' };
+  }
   spawn(executable: string, args: readonly string[]): DedicatedCodexProcess {
     this.launch = { args, executable };
     return this.process;

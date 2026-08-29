@@ -21,6 +21,8 @@ import type {
 import type { CspBypassLease } from './renderer.js';
 
 const supportedCodexVersion = '26.820.60940';
+const supportedCodexBuild = '7119';
+const supportedChromiumProduct = 'Chrome/151.0.7922.170';
 
 export interface ConnectDedicatedCodexRendererOptions {
   readonly connect?: (url: string) => Promise<CdpSession>;
@@ -32,7 +34,10 @@ export async function connectDedicatedCodexRenderer(
   request: ConnectDedicatedRendererRequest,
   options: ConnectDedicatedCodexRendererOptions = {},
 ): Promise<DedicatedRendererConnection> {
-  if (request.version !== supportedCodexVersion) {
+  if (
+    request.version !== supportedCodexVersion ||
+    request.build !== supportedCodexBuild
+  ) {
     throw new Error('Unsupported Codex Desktop version');
   }
   const session = await (options.connect ?? connectCdpSession)(
@@ -40,6 +45,10 @@ export async function connectDedicatedCodexRenderer(
   );
   let lease: CspBypassLease | null = null;
   try {
+    const browser = await session.send('Browser.getVersion');
+    if (!isRecord(browser) || browser.product !== supportedChromiumProduct) {
+      throw new Error('Unsupported Codex Desktop Chromium version');
+    }
     await session.send('Runtime.enable');
     const bindingName =
       options.createBindingName?.() ??
@@ -51,6 +60,7 @@ export async function connectDedicatedCodexRenderer(
           session.send(method, params).then(),
       },
       request.target.id,
+      cspOwnershipScope(request),
     );
     let installation = await install(session, request, bindingName, 1);
     for (
@@ -184,6 +194,12 @@ class RemoteDedicatedRendererConnection implements DedicatedRendererConnection {
     if (event.method === 'Runtime.executionContextsCleared') {
       const reopen = this.open;
       this.refresh = this.refresh.then(() => this.reinstall(reopen));
+      return;
+    }
+    if (event.method === 'CodexGit.sessionClosed') {
+      this.listeners.forEach((listener) =>
+        listener({ kind: 'standalone-required' }),
+      );
     }
   };
 
@@ -376,6 +392,17 @@ function parseHostContext(value: unknown): HostContext | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function cspOwnershipScope(request: ConnectDedicatedRendererRequest): string {
+  const { endpoint, instanceId, processId, profilePath } = request.ownership;
+  return JSON.stringify([
+    endpoint,
+    instanceId,
+    processId,
+    profilePath,
+    request.target.id,
+  ]);
 }
 
 function wait(milliseconds: number): Promise<void> {

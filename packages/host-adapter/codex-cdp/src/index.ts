@@ -13,7 +13,7 @@ export type {
   DedicatedRendererEvent,
 } from './dedicated-adapter.js';
 export {
-  isDedicatedCodexTargetOwned,
+  isDedicatedCodexTargetBoundToEndpoint,
   launchDedicatedCodexInstance,
 } from './dedicated-instance.js';
 export { connectDedicatedCodexRenderer } from './remote-renderer.js';

@@ -11,7 +11,7 @@ import type {
 
 import { AsyncStream } from './async-stream.js';
 import {
-  isDedicatedCodexTargetOwned,
+  isDedicatedCodexTargetBoundToEndpoint,
   type DedicatedCodexInstance,
   type DedicatedCodexOwnership,
   type DedicatedCodexTarget,
@@ -36,6 +36,7 @@ export interface DedicatedRendererConnection {
 }
 
 export interface ConnectDedicatedRendererRequest {
+  readonly build: string;
   readonly expectedProject: DedicatedProjectIdentity | null;
   readonly openSurface: boolean;
   readonly ownership: DedicatedCodexOwnership;
@@ -62,7 +63,10 @@ export class DedicatedCodexHostAdapter implements HostAdapter {
     const target = await this.options.instance.currentTarget();
     if (
       target === null ||
-      !isDedicatedCodexTargetOwned(target, this.options.instance.ownership)
+      !isDedicatedCodexTargetBoundToEndpoint(
+        target,
+        this.options.instance.ownership.endpoint,
+      )
     ) {
       return standaloneRequired(
         'host-unavailable',
@@ -72,6 +76,7 @@ export class DedicatedCodexHostAdapter implements HostAdapter {
 
     try {
       const renderer = await this.options.connectRenderer({
+        build: this.options.instance.build,
         expectedProject: null,
         openSurface: false,
         ownership: this.options.instance.ownership,
@@ -157,7 +162,10 @@ class ManagedDedicatedConnection implements HostConnection {
     }
     if (
       target === null ||
-      !isDedicatedCodexTargetOwned(target, this.options.instance.ownership)
+      !isDedicatedCodexTargetBoundToEndpoint(
+        target,
+        this.options.instance.ownership.endpoint,
+      )
     ) {
       await this.degrade('host-unavailable');
       return;
@@ -168,6 +176,7 @@ class ManagedDedicatedConnection implements HostConnection {
     await this.renderer.close().catch(() => undefined);
     try {
       const renderer = await this.options.connectRenderer({
+        build: this.options.instance.build,
         expectedProject: this.project,
         openSurface: reopen,
         ownership: this.options.instance.ownership,
@@ -218,13 +227,12 @@ class ManagedDedicatedConnection implements HostConnection {
   }
 
   private async closeOnce(): Promise<void> {
-    if (this.closed) {
-      return;
+    if (!this.closed) {
+      this.closed = true;
+      this.sourceSubscription();
+      this.rendererSubscription();
+      await this.replacement;
     }
-    this.closed = true;
-    this.sourceSubscription();
-    this.rendererSubscription();
-    await this.replacement;
     await this.renderer.close();
     this.contextStream.close();
     this.transitionStream.close();

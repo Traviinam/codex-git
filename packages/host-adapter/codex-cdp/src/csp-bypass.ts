@@ -17,32 +17,43 @@ const activeByTransport = new WeakMap<
   CodexCdpCommandTransport,
   Map<string, ActiveBypass>
 >();
+const activeByOwnershipScope = new Map<string, ActiveBypass>();
 
 export async function acquireDedicatedRendererCspBypass(
   transport: CodexCdpCommandTransport,
   rendererId: string,
+  ownershipScope?: string,
 ): Promise<CspBypassLease> {
   if (rendererId.length === 0) {
     throw new Error('A stable renderer ID is required for CSP bypass');
   }
 
-  let renderers = activeByTransport.get(transport);
-  if (renderers === undefined) {
-    renderers = new Map();
+  let renderers: Map<string, ActiveBypass>;
+  let key: string;
+  if (ownershipScope === undefined) {
+    renderers = activeByTransport.get(transport) ?? new Map();
     activeByTransport.set(transport, renderers);
+    key = rendererId;
+  } else {
+    renderers = activeByOwnershipScope;
+    key = ownershipScope;
   }
-  const existing = renderers.get(rendererId);
+  const existing = renderers.get(key);
   if (existing?.disabling !== null && existing?.disabling !== undefined) {
     await existing.disabling;
-    return acquireDedicatedRendererCspBypass(transport, rendererId);
+    return acquireDedicatedRendererCspBypass(
+      transport,
+      rendererId,
+      ownershipScope,
+    );
   }
   const active = existing ?? { count: 0, disabling: null };
   if (existing === undefined) {
-    renderers.set(rendererId, active);
+    renderers.set(key, active);
     try {
       await transport.send(rendererId, 'Page.setBypassCSP', { enabled: true });
     } catch (error) {
-      renderers.delete(rendererId);
+      renderers.delete(key);
       throw error;
     }
   }
@@ -70,7 +81,7 @@ export async function acquireDedicatedRendererCspBypass(
             active.count = 0;
             active.disabling = null;
             released = true;
-            renderers.delete(rendererId);
+            renderers.delete(key);
           },
           (error: unknown) => {
             active.disabling = null;

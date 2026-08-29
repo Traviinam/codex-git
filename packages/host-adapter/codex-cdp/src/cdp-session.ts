@@ -106,6 +106,9 @@ class WebSocketCdpSession implements CdpSession {
     const error = new Error('Dedicated Codex CDP session closed');
     this.pending.forEach(({ reject }) => reject(error));
     this.pending.clear();
+    this.listeners.forEach((listener) =>
+      listener({ method: 'CodexGit.sessionClosed' }),
+    );
     this.listeners.clear();
   };
 }

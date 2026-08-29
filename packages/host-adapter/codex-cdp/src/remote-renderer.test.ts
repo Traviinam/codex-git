@@ -36,6 +36,7 @@ describe('dedicated Codex remote renderer', () => {
       label: 'codex-git',
     });
     expect(session.commands.map(({ method }) => method)).toEqual([
+      'Browser.getVersion',
       'Runtime.enable',
       'Runtime.addBinding',
       'Page.setBypassCSP',
@@ -50,6 +51,14 @@ describe('dedicated Codex remote renderer', () => {
     });
     session.publish({ method: 'Runtime.executionContextsCleared' });
     await reinstalled;
+
+    const degraded = new Promise<void>((resolve) => {
+      connection.subscribe((event) => {
+        if (event.kind === 'standalone-required') resolve();
+      });
+    });
+    session.publish({ method: 'CodexGit.sessionClosed' });
+    await degraded;
 
     await connection.close();
     expect(session.commands.slice(-2).map(({ method }) => method)).toEqual([
@@ -73,6 +82,22 @@ describe('dedicated Codex remote renderer', () => {
     ).rejects.toThrow('selected project does not match');
     expect(session.closed).toBe(true);
   });
+
+  it('rejects an unverified Chromium build before changing CSP', async () => {
+    const session = new FixtureCdpSession(
+      { status: 'not-ready' },
+      'Chrome/151.0.7922.171',
+    );
+
+    await expect(
+      connectDedicatedCodexRenderer(request, {
+        connect: async () => session,
+      }),
+    ).rejects.toThrow('Unsupported Codex Desktop Chromium version');
+    expect(session.commands.map(({ method }) => method)).toEqual([
+      'Browser.getVersion',
+    ]);
+  });
 });
 
 const expectedContext = {
@@ -82,6 +107,7 @@ const expectedContext = {
 } satisfies HostContext;
 
 const request = {
+  build: '7119',
   expectedProject: null,
   openSurface: false,
   ownership: {
@@ -107,10 +133,16 @@ class FixtureCdpSession implements CdpSession {
   closed = false;
   private listener: ((event: CdpEvent) => void) | null = null;
 
-  constructor(private readonly installation: unknown | unknown[]) {}
+  constructor(
+    private readonly installation: unknown | unknown[],
+    private readonly product = 'Chrome/151.0.7922.170',
+  ) {}
 
   async send(method: string, params?: unknown): Promise<unknown> {
     this.commands.push(params === undefined ? { method } : { method, params });
+    if (method === 'Browser.getVersion') {
+      return { product: this.product };
+    }
     if (method === 'Runtime.evaluate') {
       const value = Array.isArray(this.installation)
         ? this.installation.shift()

@@ -81,4 +81,27 @@ describe('dedicated renderer CSP bypass', () => {
     await second.release();
     expect(enabled).toEqual([true, false]);
   });
+
+  it('shares a stable ownership scope across production transports', async () => {
+    const commands: string[] = [];
+    const transport = (name: string): CodexCdpCommandTransport => ({
+      async send(_rendererId, _method, params) {
+        commands.push(`${name}:${params.enabled}`);
+      },
+    });
+    const first = await acquireDedicatedRendererCspBypass(
+      transport('first'),
+      'renderer-target-42',
+      'instance-42:renderer-target-42',
+    );
+    const second = await acquireDedicatedRendererCspBypass(
+      transport('second'),
+      'renderer-target-42',
+      'instance-42:renderer-target-42',
+    );
+
+    await first.release();
+    await second.release();
+    expect(commands).toEqual(['first:true', 'second:false']);
+  });
 });
