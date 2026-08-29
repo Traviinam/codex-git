@@ -11,6 +11,7 @@ import {
   worktreeIdSchema,
 } from './identifiers.js';
 import { nativeActionKindSchema } from './native-actions.js';
+import { PROTOCOL_LIMITS } from './session.js';
 
 export const revisionSchema = z.number().int().nonnegative();
 const objectIdSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u);
@@ -38,7 +39,7 @@ export const diffResultSchema = z.discriminatedUnion('kind', [
     kind: z.literal('text'),
     fileId: fileIdSchema,
     baseline: diffBaselineSchema,
-    content: utf8StringAtMost(2_097_152),
+    content: utf8StringAtMost(PROTOCOL_LIMITS.diffOutputBytes),
     lineCount: z.number().int().nonnegative().max(20_000),
   }),
   z.strictObject({
@@ -89,7 +90,7 @@ export const commitDraftUpdateSchema = z.strictObject({
     z.strictObject({ kind: z.literal('clear') }),
     z.strictObject({
       kind: z.literal('set'),
-      text: utf8StringAtMost(65_536),
+      text: utf8StringAtMost(PROTOCOL_LIMITS.draftBytes),
     }),
   ]),
 });
@@ -97,7 +98,7 @@ export const commitDraftUpdateSchema = z.strictObject({
 export const commitDraftSchema = z.strictObject({
   worktreeId: worktreeIdSchema,
   revision: revisionSchema,
-  text: utf8StringAtMost(65_536),
+  text: utf8StringAtMost(PROTOCOL_LIMITS.draftBytes),
 });
 
 export const refreshStateSchema = z.discriminatedUnion('kind', [

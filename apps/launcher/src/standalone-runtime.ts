@@ -2,9 +2,11 @@ import type { Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
 
 import type { HostConnection } from '@codex-git/host-adapter';
-import { createAppServer } from '@codex-git/server';
+import { startLoopbackServer, type LoopbackServer } from '@codex-git/server';
 import { StandaloneHostAdapter } from '@codex-git/host-adapter-standalone';
 import { createServer as createViteServer, type ViteDevServer } from 'vite';
+
+import { protocolBootstrapPlugin } from './protocol-bootstrap.js';
 
 const loopbackHost = '127.0.0.1';
 const uiConfigPath = fileURLToPath(
@@ -12,12 +14,12 @@ const uiConfigPath = fileURLToPath(
 );
 
 export interface StandaloneRuntimeOptions {
-  readonly healthPort?: number;
   readonly surfacePort?: number;
 }
 
 export interface StandaloneRuntime {
   readonly healthUrl: URL;
+  readonly sessionUrl: URL;
   readonly surfaceUrl: URL;
   close(): Promise<void>;
 }
@@ -25,7 +27,7 @@ export interface StandaloneRuntime {
 export async function startStandaloneRuntime(
   options: StandaloneRuntimeOptions = {},
 ): Promise<StandaloneRuntime> {
-  const healthServer = createAppServer();
+  let protocolServer: LoopbackServer | undefined;
   let surfaceServer: ViteDevServer | undefined;
   let hostConnection: HostConnection | null = null;
 
@@ -33,16 +35,15 @@ export async function startStandaloneRuntime(
     await Promise.all([
       hostConnection?.close(),
       surfaceServer?.close(),
-      closeServer(healthServer),
+      protocolServer?.close(),
     ]);
   }
 
   try {
-    await listen(healthServer, options.healthPort ?? 0);
-    const healthUrl = serverUrl(healthServer, '/health');
-
+    protocolServer = await startLoopbackServer({ allowedOrigins: ['null'] });
     surfaceServer = await createViteServer({
       configFile: uiConfigPath,
+      plugins: [protocolBootstrapPlugin(protocolServer.sessionUrl)],
       server: {
         host: loopbackHost,
         port: options.surfacePort ?? 5173,
@@ -52,6 +53,7 @@ export async function startStandaloneRuntime(
     await surfaceServer.listen();
 
     const surfaceUrl = serverUrl(surfaceServer.httpServer, '/');
+    protocolServer.allowOrigin(surfaceUrl.origin);
     const hostResult = await new StandaloneHostAdapter().attach({
       title: 'Codex Git',
       url: surfaceUrl,
@@ -61,7 +63,8 @@ export async function startStandaloneRuntime(
     let closed = false;
 
     return {
-      healthUrl,
+      healthUrl: protocolServer.healthUrl,
+      sessionUrl: protocolServer.sessionUrl,
       surfaceUrl,
       async close() {
         if (closed) {
@@ -76,23 +79,6 @@ export async function startStandaloneRuntime(
     await closeResources();
     throw error;
   }
-}
-
-function listen(server: Server, port: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const handleError = (error: Error) => {
-      server.off('listening', handleListening);
-      reject(error);
-    };
-    const handleListening = () => {
-      server.off('error', handleError);
-      resolve();
-    };
-
-    server.once('error', handleError);
-    server.once('listening', handleListening);
-    server.listen(port, loopbackHost);
-  });
 }
 
 function serverUrl(
@@ -110,14 +96,4 @@ function serverUrl(
   }
 
   return new URL(pathname, `http://${loopbackHost}:${address.port}`);
-}
-
-function closeServer(server: Server): Promise<void> {
-  if (!server.listening) {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()));
-  });
 }

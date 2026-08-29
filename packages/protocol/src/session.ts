@@ -2,6 +2,12 @@ import { z } from 'zod';
 
 import { PROTOCOL_VERSION } from './core.js';
 
+export const PROTOCOL_LIMITS = {
+  diffOutputBytes: 2_097_152,
+  draftBytes: 65_536,
+  requestBodyBytes: 262_144,
+} as const;
+
 export const sessionMetadataSchema = z.strictObject({
   protocolVersion: z.literal(PROTOCOL_VERSION),
   capabilities: z.strictObject({

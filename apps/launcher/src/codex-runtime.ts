@@ -77,6 +77,7 @@ export async function startCodexRuntime(
 
   return {
     healthUrl: standalone.healthUrl,
+    sessionUrl: standalone.sessionUrl,
     surfaceUrl: standalone.surfaceUrl,
     currentHost: () => host,
     async close() {
