@@ -39,6 +39,12 @@ export type HostAttachResult =
 export interface HostConnection {
   currentContext(): HostContext;
   contexts(): AsyncIterable<HostContext>;
+  transitions(): AsyncIterable<HostTransition>;
   perform(action: NativeHostAction): Promise<NativeActionResult>;
   close(): Promise<void>;
 }
+
+export type HostTransition = {
+  readonly kind: 'standalone-required';
+  readonly reason: SanitizedDiagnostic;
+};

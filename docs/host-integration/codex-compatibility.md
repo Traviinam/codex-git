@@ -5,11 +5,10 @@ official Codex extension interface. The standalone Host Adapter remains the
 supported fallback whenever discovery, compatibility, attachment, or remounting
 cannot be proven safe.
 
-This foundation implements the typed Host Adapter contract, strict compatibility
-probe, DOM lifecycle, message boundary, and CSP lease primitive. Production CDP
-discovery and transport, dedicated-instance ownership binding, renderer and DOM
-replacement, launcher composition, fallback transitions, and manual smoke
-verification are tracked in [#30](https://github.com/codeacme17/codex-git/issues/30).
+The production integration launches a dedicated profile, binds its loopback CDP
+endpoint and target, and connects only the tested public DOM anchors. It preserves
+the launcher-owned project path across renderer generations, reference-counts CSP
+bypass, and reports typed standalone transitions when safe attachment is lost.
 
 ## Trust and ownership requirements
 
@@ -48,11 +47,10 @@ Any Codex version or DOM shape not listed here fails closed before mutation. A
 new version requires a new explicit profile and the same fixture and manual smoke
 matrix; do not widen selectors to make an unknown build appear compatible.
 
-## Pending manual smoke matrix
+## Manual smoke matrix
 
-Issue [#30](https://github.com/codeacme17/codex-git/issues/30) must run this
-matrix against a disposable dedicated profile with a loopback CDP endpoint and
-record the exact Codex and Chromium versions with the result.
+This matrix passed on 2026-08-29 against a disposable dedicated profile using
+Codex Desktop `26.820.60940` (build `7119`) and Chromium `151.0.7922.170`.
 
 - Open `Git` and confirm exactly one entry and one full-page frame.
 - Select a native destination and confirm native content is restored with no

@@ -59,4 +59,26 @@ describe('dedicated renderer CSP bypass', () => {
     await expect(lease.release()).resolves.toBeUndefined();
     expect(disableAttempts).toBe(2);
   });
+
+  it('reference-counts concurrent leases for the same renderer', async () => {
+    const enabled: boolean[] = [];
+    const transport: CodexCdpCommandTransport = {
+      async send(_rendererId, _method, params) {
+        enabled.push(params.enabled);
+      },
+    };
+
+    const first = await acquireDedicatedRendererCspBypass(
+      transport,
+      'renderer-target-42',
+    );
+    const second = await acquireDedicatedRendererCspBypass(
+      transport,
+      'renderer-target-42',
+    );
+    await first.release();
+    expect(enabled).toEqual([true]);
+    await second.release();
+    expect(enabled).toEqual([true, false]);
+  });
 });
