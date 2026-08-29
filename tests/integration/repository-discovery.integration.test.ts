@@ -17,8 +17,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   createRepositoryEngine,
-  type RepositoryDiscovery,
   type RepositorySession,
+  type RepositorySnapshot,
 } from '@codex-git/repository-engine';
 
 import {
@@ -241,11 +241,6 @@ describe('Repository Engine discovery', () => {
     expect(linkedResult.repository.worktrees[1]?.canonicalPath).toBe(
       await realpath(linkedPath),
     );
-    expect(
-      Buffer.from(
-        linkedResult.repository.worktrees[1]?.canonicalPathBytes ?? [],
-      ),
-    ).toEqual(Buffer.from(await realpath(linkedPath)));
     expect(linkedResult.repository.worktrees[1]?.head).toEqual({
       kind: 'local_branch',
       fullName: 'refs/heads/feature/linked',
@@ -754,14 +749,14 @@ function asAbsolutePath(path: string): AbsolutePath {
 async function openRepository(
   engine: ReturnType<typeof createRepositoryEngine>,
   anchor: string,
-): Promise<RepositoryDiscovery> {
+): Promise<RepositorySnapshot> {
   const session = await engine.open(asAbsolutePath(anchor));
   return snapshotRepository(session);
 }
 
 async function snapshotRepository(
   session: RepositorySession,
-): Promise<RepositoryDiscovery> {
+): Promise<RepositorySnapshot> {
   const result = await session.snapshot();
   if (result.kind !== 'repository') {
     throw new Error('Expected the fixture to resolve to a Repository.');
@@ -769,7 +764,7 @@ async function snapshotRepository(
   return result.repository;
 }
 
-function findWorktree(repository: RepositoryDiscovery, canonicalPath: string) {
+function findWorktree(repository: RepositorySnapshot, canonicalPath: string) {
   const worktree = repository.worktrees.find(
     (candidate) => candidate.canonicalPath === canonicalPath,
   );
