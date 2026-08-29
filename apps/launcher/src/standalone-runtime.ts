@@ -6,13 +6,14 @@ import { startLoopbackServer, type LoopbackServer } from '@codex-git/server';
 import { StandaloneHostAdapter } from '@codex-git/host-adapter-standalone';
 import { createServer as createViteServer, type ViteDevServer } from 'vite';
 
+import { protocolBootstrapPlugin } from './protocol-bootstrap.js';
+
 const loopbackHost = '127.0.0.1';
 const uiConfigPath = fileURLToPath(
   new URL('../../ui/vite.config.ts', import.meta.url),
 );
 
 export interface StandaloneRuntimeOptions {
-  readonly healthPort?: 0;
   readonly surfacePort?: number;
 }
 
@@ -39,8 +40,10 @@ export async function startStandaloneRuntime(
   }
 
   try {
+    protocolServer = await startLoopbackServer({ allowedOrigins: ['null'] });
     surfaceServer = await createViteServer({
       configFile: uiConfigPath,
+      plugins: [protocolBootstrapPlugin(protocolServer.sessionUrl)],
       server: {
         host: loopbackHost,
         port: options.surfacePort ?? 5173,
@@ -50,9 +53,7 @@ export async function startStandaloneRuntime(
     await surfaceServer.listen();
 
     const surfaceUrl = serverUrl(surfaceServer.httpServer, '/');
-    protocolServer = await startLoopbackServer({
-      allowedOrigins: ['null', surfaceUrl.origin],
-    });
+    protocolServer.allowOrigin(surfaceUrl.origin);
     const hostResult = await new StandaloneHostAdapter().attach({
       title: 'Codex Git',
       url: surfaceUrl,

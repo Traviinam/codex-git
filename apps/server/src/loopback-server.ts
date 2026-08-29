@@ -9,6 +9,7 @@ import type { AddressInfo } from 'node:net';
 import {
   PROTOCOL_VERSION,
   PROTOCOL_VERSION_HEADER,
+  PROTOCOL_LIMITS,
   redactDiagnostic,
   sseInvalidationSchema,
   type HealthResponse,
@@ -36,19 +37,15 @@ const endpointMethods = new Map<string, string>([
 const sessionMetadata = {
   protocolVersion: PROTOCOL_VERSION,
   capabilities: {
-    branchSearch: true,
-    commands: true,
-    commitDrafts: true,
-    diff: true,
+    branchSearch: false,
+    commands: false,
+    commitDrafts: false,
+    diff: false,
     events: true,
-    nativeActions: true,
-    operationRecovery: true,
+    nativeActions: false,
+    operationRecovery: false,
   },
-  limits: {
-    diffOutputBytes: 2_097_152,
-    draftBytes: 65_536,
-    requestBodyBytes: 262_144,
-  },
+  limits: PROTOCOL_LIMITS,
 } satisfies SessionMetadata;
 
 export interface LoopbackAddress {
@@ -61,6 +58,7 @@ export interface LoopbackServer {
   readonly eventsUrl: URL;
   readonly healthUrl: URL;
   readonly sessionUrl: URL;
+  allowOrigin(origin: string): void;
   publish(event: unknown): boolean;
   close(): Promise<void>;
 }
@@ -111,21 +109,25 @@ export async function startLoopbackServer(
 
   const address = server.address() as AddressInfo;
   const baseUrl = new URL(`http://${loopbackHost}:${address.port}`);
-  let closed = false;
+  let closePromise: Promise<void> | undefined;
 
   return {
     address: { host: loopbackHost, port: address.port },
     eventsUrl: new URL(`${instancePrefix}/events`, baseUrl),
     healthUrl: new URL('/health', baseUrl),
     sessionUrl: new URL(`${instancePrefix}/session`, baseUrl),
+    allowOrigin(origin) {
+      allowedOrigins.add(origin);
+    },
     publish: events.publish,
-    async close() {
-      if (closed) return;
-      closed = true;
+    close() {
+      if (closePromise !== undefined) return closePromise;
       events.closeAll();
-      await new Promise<void>((resolve, reject) => {
+      closePromise = new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });
+      server.closeAllConnections();
+      return closePromise;
     },
   };
 }
@@ -190,7 +192,7 @@ async function handleRequest(
     return;
   }
 
-  if (version !== String(PROTOCOL_VERSION)) {
+  if (endpoint !== 'events' && version !== String(PROTOCOL_VERSION)) {
     sendProtocolError(response, 426, {
       code: 'unsupported_protocol_version',
       details: {
@@ -328,6 +330,7 @@ function handlePreflight(
     .filter((header) => header.length > 0);
   const allowedHeaders = new Set([
     'content-type',
+    'last-event-id',
     PROTOCOL_VERSION_HEADER.toLowerCase(),
   ]);
   if (requestedHeaders.some((header) => !allowedHeaders.has(header))) {
@@ -392,7 +395,12 @@ function createEventBroker(): EventBroker {
       nextId += 1;
       history.push(stored);
       if (history.length > 100) history.shift();
-      for (const client of clients) client.write(stored.frame);
+      for (const client of clients) {
+        if (!client.write(stored.frame)) {
+          clients.delete(client);
+          client.destroy();
+        }
+      }
       return true;
     },
     open(request, response, origin) {
@@ -424,7 +432,11 @@ function createEventBroker(): EventBroker {
       response.once('close', () => clients.delete(response));
       if (lastEventId !== undefined) {
         for (const event of history) {
-          if (event.id > lastEventId) response.write(event.frame);
+          if (event.id > lastEventId && !response.write(event.frame)) {
+            clients.delete(response);
+            response.destroy();
+            return;
+          }
         }
       }
     },

@@ -1,3 +1,5 @@
+import { request as httpRequest } from 'node:http';
+
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { PROTOCOL_VERSION_HEADER } from '@codex-git/protocol';
@@ -21,16 +23,19 @@ describe('loopback server lifecycle', () => {
     });
     servers.push(server);
 
+    const token = server.sessionUrl.pathname.split('/')[2];
     expect({
       host: server.address.host,
       portIsEphemeral: server.address.port > 0,
       randomByteRequests,
-      sessionPath: server.sessionUrl.pathname,
+      tokenIsHex: token !== undefined && /^[0-9a-f]+$/u.test(token),
+      tokenLength: token?.length,
     }).toEqual({
       host: '127.0.0.1',
       portIsEphemeral: true,
       randomByteRequests: [32],
-      sessionPath: `/instance/${'ab'.repeat(32)}/v1/session`,
+      tokenIsHex: true,
+      tokenLength: 64,
     });
   });
 
@@ -54,13 +59,13 @@ describe('loopback server lifecycle', () => {
       body: {
         protocolVersion: 1,
         capabilities: {
-          branchSearch: true,
-          commands: true,
-          commitDrafts: true,
-          diff: true,
+          branchSearch: false,
+          commands: false,
+          commitDrafts: false,
+          diff: false,
           events: true,
-          nativeActions: true,
-          operationRecovery: true,
+          nativeActions: false,
+          operationRecovery: false,
         },
         limits: {
           diffOutputBytes: 2_097_152,
@@ -235,10 +240,7 @@ describe('loopback server lifecycle', () => {
   it('streams only validated invalidations and replays them after reconnect', async () => {
     const server = await startLoopbackServer({ allowedOrigins: ['null'] });
     servers.push(server);
-    const headers = {
-      origin: 'null',
-      [PROTOCOL_VERSION_HEADER]: '1',
-    };
+    const headers = { origin: 'null' };
     const firstResponse = await fetch(server.eventsUrl, { headers });
 
     expect(
@@ -304,7 +306,42 @@ describe('loopback server lifecycle', () => {
       randomBytes: (length) => new Uint8Array(length).fill(0xbb),
     });
     servers.push(restarted);
-    expect(restarted.sessionUrl.pathname).not.toBe(first.sessionUrl.pathname);
+    expect(restarted.sessionUrl.pathname === first.sessionUrl.pathname).toBe(
+      false,
+    );
+  });
+
+  it('forces an incomplete authenticated request to close during shutdown', async () => {
+    const server = await startLoopbackServer({ allowedOrigins: ['null'] });
+    servers.push(server);
+    const commandsUrl = new URL(server.sessionUrl);
+    commandsUrl.pathname = commandsUrl.pathname.replace(
+      /\/session$/u,
+      '/commands',
+    );
+    const request = httpRequest(commandsUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': '100',
+        origin: 'null',
+        [PROTOCOL_VERSION_HEADER]: '1',
+      },
+    });
+    await new Promise<void>((resolve, reject) => {
+      request.once('error', reject);
+      request.write('{', (error) => (error ? reject(error) : resolve()));
+    });
+
+    const closing = server.close();
+    const completedPromptly = await Promise.race([
+      closing.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 200)),
+    ]);
+    request.destroy();
+    await closing;
+
+    expect(completedPromptly).toBe(true);
   });
 });
 

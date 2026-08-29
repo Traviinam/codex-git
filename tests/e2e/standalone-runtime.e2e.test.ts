@@ -14,7 +14,6 @@ afterEach(async () => {
 describe('standalone runtime', () => {
   it('serves the health endpoint and placeholder Git Surface', async () => {
     const runtime = await startStandaloneRuntime({
-      healthPort: 0,
       surfacePort: 0,
     });
     runtimes.push(runtime);

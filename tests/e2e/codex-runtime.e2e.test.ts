@@ -20,7 +20,6 @@ describe('Codex runtime composition', () => {
   it('closes the dedicated instance and remains standalone when ownership fails', async () => {
     const instance = new FixtureInstance(null);
     const runtime = await startCodexRuntime({
-      healthPort: 0,
       launchInstance: async () => instance,
       projectPath: '/Users/example/codex-git',
       surfacePort: 0,
@@ -36,7 +35,6 @@ describe('Codex runtime composition', () => {
     const renderer = new FailingRenderer();
     const runtime = await startCodexRuntime({
       connectRenderer: async () => renderer,
-      healthPort: 0,
       launchInstance: async () => instance,
       projectPath: '/Users/example/codex-git',
       surfacePort: 0,
