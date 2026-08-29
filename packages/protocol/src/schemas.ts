@@ -166,13 +166,34 @@ export const nativeTargetDescriptorSchema = z.strictObject({
   actions: z.array(nativeActionKindSchema).min(1).readonly(),
 });
 
-export const changedFileSchema = z.strictObject({
+const changedFileBase = {
   fileId: fileIdSchema,
-  kind: z.enum(['conflict', 'staged_change', 'change', 'untracked']),
-  baseline: diffBaselineSchema,
   displayPath: z.string().min(1).max(4_096),
   nativeTargets: z.array(nativeTargetDescriptorSchema).readonly(),
-});
+} as const;
+
+export const changedFileSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    ...changedFileBase,
+    kind: z.literal('conflict'),
+    baseline: z.literal('conflict'),
+  }),
+  z.strictObject({
+    ...changedFileBase,
+    kind: z.literal('staged_change'),
+    baseline: z.literal('head_to_index'),
+  }),
+  z.strictObject({
+    ...changedFileBase,
+    kind: z.literal('change'),
+    baseline: z.literal('index_to_working_tree'),
+  }),
+  z.strictObject({
+    ...changedFileBase,
+    kind: z.literal('untracked'),
+    baseline: z.literal('empty_to_working_tree'),
+  }),
+]);
 
 export const remoteSummarySchema = z.strictObject({
   remoteId: remoteIdSchema,

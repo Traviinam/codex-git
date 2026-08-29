@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   branchSearchRequestSchema,
   branchSearchResultSchema,
+  changedFileSchema,
   createOpaqueIdAuthority,
   createDiagnosticRedactor,
   commitDraftUpdateSchema,
@@ -58,6 +59,16 @@ describe('protocol runtime schemas', () => {
         message: 'The requested protocol version is not supported.',
       },
     });
+  });
+
+  it('does not reflect a secret-bearing cross-version value', () => {
+    const result = parseProtocolPayload(sessionMetadataSchema, {
+      protocolVersion: 'token=fixture-cross-version-secret',
+    });
+
+    expect(JSON.stringify(result)).not.toContain(
+      'fixture-cross-version-secret',
+    );
   });
 
   it('does not reflect secret-shaped attacker input in validation errors', () => {
@@ -182,6 +193,18 @@ describe('protocol runtime schemas', () => {
     expect(result.success).toBe(true);
   });
 
+  it('rejects an incoherent Changed File kind and Diff Baseline', () => {
+    const result = changedFileSchema.safeParse({
+      fileId: 'file_0123456789abcdef0123456789abcdef',
+      kind: 'untracked',
+      baseline: 'head_to_index',
+      displayPath: 'new-file.ts',
+      nativeTargets: [],
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   it('accepts branch search results whose targets are opaque Ref IDs', () => {
     const request = branchSearchRequestSchema.safeParse({
       worktreeId: 'worktree_0123456789abcdef0123456789abcdef',
@@ -291,6 +314,35 @@ describe('protocol runtime schemas', () => {
           message: 'The Remote is offline.',
         },
       ],
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects Partial Success without both success and failure effects', () => {
+    const result = operationResultSchema.safeParse({
+      kind: 'partial_success',
+      operationId: 'operation_0123456789abcdef0123456789abcdef',
+      message: 'Everything succeeded.',
+      effects: [
+        { kind: 'succeeded', label: 'origin' },
+        { kind: 'succeeded', label: 'backup' },
+      ],
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it.each([
+    ['rejected', 'missing_identity'],
+    ['rejected', 'index_locked'],
+    ['failed_known', 'signing_failed'],
+  ] as const)('accepts distinct %s outcome code %s', (kind, code) => {
+    const result = operationResultSchema.safeParse({
+      kind,
+      operationId: 'operation_0123456789abcdef0123456789abcdef',
+      code,
+      message: 'The Commit could not proceed.',
     });
 
     expect(result.success).toBe(true);

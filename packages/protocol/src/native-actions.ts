@@ -15,16 +15,10 @@ export const nativeActionKindSchema = z.enum([
 
 const target = { targetId: nativeTargetIdSchema } as const;
 
-export const nativeActionRequestSchema = z.discriminatedUnion('kind', [
-  z.strictObject({ kind: z.literal('open_terminal'), ...target }),
-  z.strictObject({ kind: z.literal('reveal_in_finder'), ...target }),
-  z.strictObject({ kind: z.literal('copy_absolute_path'), ...target }),
-  z.strictObject({ kind: z.literal('copy_branch_or_sha'), ...target }),
-  z.strictObject({ kind: z.literal('open_codex_context'), ...target }),
-  z.strictObject({ kind: z.literal('open_file_in_codex'), ...target }),
-  z.strictObject({ kind: z.literal('copy_relative_path'), ...target }),
-  z.strictObject({ kind: z.literal('open_default_app'), ...target }),
-]);
+export const nativeActionRequestSchema = z.strictObject({
+  kind: nativeActionKindSchema,
+  ...target,
+});
 
 export const nativeActionResultSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('performed') }),

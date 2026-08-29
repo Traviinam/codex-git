@@ -14,6 +14,7 @@ export const operationFailureCodeSchema = z.enum([
   'permission',
   'policy',
   'process_failed',
+  'signing_failed',
   'timeout',
 ]);
 
@@ -57,7 +58,14 @@ export const operationResultSchema = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('rejected'),
     operationId: operationIdSchema,
-    code: z.enum(['busy', 'stale', 'precondition_failed', 'unsupported_state']),
+    code: z.enum([
+      'busy',
+      'index_locked',
+      'missing_identity',
+      'stale',
+      'precondition_failed',
+      'unsupported_state',
+    ]),
     message: messageSchema,
   }),
   z.strictObject({
@@ -87,6 +95,14 @@ export const operationResultSchema = z.discriminatedUnion('kind', [
       )
       .min(2)
       .max(1_000)
+      .refine(
+        (effects) =>
+          effects.some(({ kind }) => kind === 'succeeded') &&
+          effects.some(({ kind }) => kind === 'failed_known'),
+        {
+          message: 'Partial Success requires both success and failure effects.',
+        },
+      )
       .readonly(),
   }),
   z.strictObject({

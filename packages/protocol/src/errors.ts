@@ -65,10 +65,11 @@ export function parseProtocolPayload<T>(
         code: 'unsupported_protocol_version',
         details: {
           received:
-            typeof input.protocolVersion === 'number' ||
-            typeof input.protocolVersion === 'string'
+            typeof input.protocolVersion === 'number'
               ? input.protocolVersion
-              : null,
+              : typeof input.protocolVersion === 'string'
+                ? redactDiagnostic(input.protocolVersion)
+                : null,
           supported: [PROTOCOL_VERSION],
         },
         message: 'The requested protocol version is not supported.',
