@@ -16,17 +16,14 @@ import {
   parseWorktreeListPorcelain,
   type WorktreePorcelainRecord,
 } from './worktree-porcelain.js';
+import {
+  createRepositoryPublicationSession,
+  type RepositorySession,
+} from './repository-publication.js';
 
 const GIT_OUTPUT_LIMIT_BYTES = 4 * 1_024 * 1_024;
 const GIT_TIMEOUT_MILLISECONDS = 10_000;
 const ZERO_OBJECT_ID = /^(?:0{40}|0{64})$/u;
-
-export type RepositoryOpenResult =
-  | { readonly kind: 'not_repository' }
-  | {
-      readonly kind: 'repository';
-      readonly repository: RepositoryDiscovery;
-    };
 
 export interface RepositoryDiscovery {
   readonly repositoryId: RepositoryId;
@@ -70,15 +67,6 @@ export type WorktreeAvailability =
 
 export interface RepositoryEngine {
   open(anchor: AbsolutePath): Promise<RepositorySession>;
-}
-
-/**
- * The #6 session publishes discovery facts only. Revisioned refresh,
- * subscriptions, and product operations are added by their owning issues.
- */
-export interface RepositorySession {
-  snapshot(): Promise<RepositoryOpenResult>;
-  close(): Promise<void>;
 }
 
 interface RepositoryIdentityState {
@@ -127,6 +115,7 @@ export function createRepositoryEngine(): RepositoryEngine {
             beginSnapshot(state);
             return { kind: 'not_repository' };
           },
+          async *subscribe() {},
           async close() {
             closeSession(state);
             ids.revokeAll();
@@ -139,27 +128,37 @@ export function createRepositoryEngine(): RepositoryEngine {
         repositoryId: ids.issue('repository'),
         generations: new Map(),
       };
-
-      return {
-        async snapshot() {
+      return createRepositoryPublicationSession({
+        async read() {
           const sessionGeneration = beginSnapshot(state);
-          return discoverRepository(
+          const candidateIdentity: RepositoryIdentityState = {
+            ...identity,
+            generations: new Map(identity.generations),
+          };
+          const result = await discoverRepository(
             resolved,
-            identity,
+            candidateIdentity,
             ids,
             state,
             sessionGeneration,
           );
+          assertSessionGeneration(state, sessionGeneration);
+          return {
+            discovery: result.repository,
+            commit() {
+              identity.generations = candidateIdentity.generations;
+            },
+          };
         },
-        async close() {
-          if (state.status !== 'open') {
-            return;
-          }
+        canRetainFailure() {
+          return state.status === 'open';
+        },
+        close() {
           closeSession(state);
           identity.generations.clear();
           ids.revokeAll();
         },
-      };
+      });
     },
   };
 }
@@ -170,7 +169,10 @@ async function discoverRepository(
   ids: OpaqueIdAuthority,
   state: SessionState,
   sessionGeneration: number,
-): Promise<RepositoryOpenResult> {
+): Promise<{
+  readonly kind: 'repository';
+  readonly repository: RepositoryDiscovery;
+}> {
   await assertRepositoryContinuity(
     resolved,
     identity,
@@ -616,6 +618,9 @@ function runGit(
             new GitCommandError(
               typeof error.code === 'number' ? error.code : null,
               error.message,
+              error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+                ? 'output_too_large'
+                : 'command_failed',
             ),
           );
           return;
@@ -673,6 +678,7 @@ class GitCommandError extends Error {
   constructor(
     readonly exitCode: number | null,
     message: string,
+    readonly failure: 'command_failed' | 'output_too_large',
   ) {
     super(message);
     this.name = 'GitCommandError';
