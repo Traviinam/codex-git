@@ -196,10 +196,13 @@ export const changedFileSchema = z.discriminatedUnion('kind', [
   }),
 ]);
 
+const sanitizedRemoteHostPattern =
+  /^(?:\[[\da-f:.]+\]|[\da-z](?:[\da-z.-]*[\da-z])?)(?::\d{1,5})?$/iu;
+
 export const remoteSummarySchema = z.strictObject({
   remoteId: remoteIdSchema,
   displayName: z.string().min(1).max(256),
-  host: z.string().min(1).max(1_024),
+  host: z.string().min(1).max(1_024).regex(sanitizedRemoteHostPattern),
 });
 
 export const worktreeSnapshotSchema = z.strictObject({
