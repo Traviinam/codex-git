@@ -14,8 +14,13 @@ import {
   sseInvalidationSchema,
   type HealthResponse,
   type ProtocolError,
-  type SessionMetadata,
 } from '@codex-git/protocol';
+
+import {
+  createProtocolDispatcher,
+  type ProtocolDispatcher,
+  type ProtocolHandlers,
+} from './protocol-dispatch.js';
 
 const healthResponse = {
   product: 'codex-git',
@@ -34,20 +39,6 @@ const endpointMethods = new Map<string, string>([
   ['session', 'GET'],
   ['snapshot', 'GET'],
 ]);
-const sessionMetadata = {
-  protocolVersion: PROTOCOL_VERSION,
-  capabilities: {
-    branchSearch: false,
-    commands: false,
-    commitDrafts: false,
-    diff: false,
-    events: true,
-    nativeActions: false,
-    operationRecovery: false,
-  },
-  limits: PROTOCOL_LIMITS,
-} satisfies SessionMetadata;
-
 export interface LoopbackAddress {
   readonly host: typeof loopbackHost;
   readonly port: number;
@@ -65,6 +56,7 @@ export interface LoopbackServer {
 
 export interface LoopbackServerOptions {
   readonly allowedOrigins?: readonly string[];
+  readonly handlers?: ProtocolHandlers;
   readonly randomBytes?: (length: number) => Uint8Array;
 }
 
@@ -78,6 +70,7 @@ export async function startLoopbackServer(
   const token = Buffer.from(tokenBytes).toString('hex');
   const instancePrefix = `/instance/${token}/v1`;
   const allowedOrigins = new Set(options.allowedOrigins ?? []);
+  const dispatcher = createProtocolDispatcher(options.handlers);
   const events = createEventBroker();
   const server = createServer((request, response) => {
     void handleRequest(
@@ -86,6 +79,7 @@ export async function startLoopbackServer(
       token,
       instancePrefix,
       allowedOrigins,
+      dispatcher,
       events,
     ).catch(() => {
       if (!response.headersSent) {
@@ -138,6 +132,7 @@ async function handleRequest(
   token: string,
   instancePrefix: string,
   allowedOrigins: ReadonlySet<string>,
+  dispatcher: ProtocolDispatcher,
   events: EventBroker,
 ): Promise<void> {
   if (request.socket.remoteAddress !== loopbackHost) {
@@ -234,6 +229,7 @@ async function handleRequest(
     return;
   }
 
+  let body: Buffer | undefined;
   if (expectedMethod === 'POST' || expectedMethod === 'PUT') {
     const mediaType = request.headers['content-type']?.split(';', 1)[0]?.trim();
     if (mediaType !== 'application/json') {
@@ -249,23 +245,26 @@ async function handleRequest(
       );
       return;
     }
-    const body = await readBoundedBody(
+    const requestBody = await readBoundedBody(
       request,
-      sessionMetadata.limits.requestBodyBytes,
+      dispatcher.sessionMetadata.limits.requestBodyBytes,
     );
-    if (body === null) {
+    if (requestBody === null) {
       sendProtocolError(
         response,
         413,
         {
           code: 'body_too_large',
-          details: { limitBytes: sessionMetadata.limits.requestBodyBytes },
+          details: {
+            limitBytes: dispatcher.sessionMetadata.limits.requestBodyBytes,
+          },
           message: 'The request body exceeds the configured limit.',
         },
         origin,
       );
       return;
     }
+    body = requestBody;
   }
 
   if (endpoint === 'events') {
@@ -274,7 +273,26 @@ async function handleRequest(
   }
 
   if (endpoint === 'session') {
-    sendJson(response, 200, sessionMetadata, origin);
+    sendJson(response, 200, dispatcher.sessionMetadata, origin);
+    return;
+  }
+
+  try {
+    const dispatched = await dispatcher.dispatch(endpoint, body);
+    if (dispatched !== undefined) {
+      sendJson(response, dispatched.status, dispatched.value, origin);
+      return;
+    }
+  } catch {
+    sendProtocolError(
+      response,
+      500,
+      {
+        code: 'internal_error',
+        message: 'The protocol request could not be completed.',
+      },
+      origin,
+    );
     return;
   }
 
@@ -505,7 +523,7 @@ function sendJson(
   origin?: string,
 ): void {
   const body = JSON.stringify(value);
-  if (Buffer.byteLength(body) > sessionMetadata.limits.diffOutputBytes) {
+  if (Buffer.byteLength(body) > PROTOCOL_LIMITS.diffOutputBytes) {
     response.writeHead(507, {
       ...(origin === undefined
         ? {}
@@ -516,7 +534,7 @@ function sendJson(
       JSON.stringify({
         error: {
           code: 'output_too_large',
-          details: { limitBytes: sessionMetadata.limits.diffOutputBytes },
+          details: { limitBytes: PROTOCOL_LIMITS.diffOutputBytes },
           message: 'The protocol response exceeds the configured limit.',
         },
       }),
