@@ -1,0 +1,447 @@
+import { execFile } from 'node:child_process';
+import { realpath, stat } from 'node:fs/promises';
+import { isAbsolute, resolve } from 'node:path';
+
+import {
+  createOpaqueIdAuthority,
+  type AbsolutePath,
+  type OpaqueIdAuthority,
+  type RepositoryId,
+  type WorktreeGeneration,
+  type WorktreeId,
+} from '@codex-git/protocol';
+
+import {
+  parseWorktreeListPorcelain,
+  type WorktreePorcelainRecord,
+} from './worktree-porcelain.js';
+
+const GIT_OUTPUT_LIMIT_BYTES = 4 * 1_024 * 1_024;
+const GIT_TIMEOUT_MILLISECONDS = 10_000;
+const ZERO_OBJECT_ID = /^(?:0{40}|0{64})$/u;
+
+export type RepositoryOpenResult =
+  | { readonly kind: 'not_repository' }
+  | {
+      readonly kind: 'repository';
+      readonly repository: RepositoryDiscovery;
+    };
+
+export interface RepositoryDiscovery {
+  readonly repositoryId: RepositoryId;
+  readonly commonGitDirectory: AbsolutePath;
+  readonly selectedWorktreeId: WorktreeId | null;
+  readonly worktrees: readonly DiscoveredWorktree[];
+}
+
+export interface DiscoveredWorktree {
+  readonly worktreeId: WorktreeId;
+  readonly generation: WorktreeGeneration;
+  readonly displayPath: string;
+  readonly canonicalPath: AbsolutePath;
+  readonly role: 'main' | 'linked';
+  readonly head: DiscoveredHead;
+  readonly gitLock: GitLockState;
+  readonly availability: WorktreeAvailability;
+}
+
+export type DiscoveredHead =
+  | {
+      readonly kind: 'local_branch';
+      readonly fullName: string;
+      readonly displayName: string;
+      readonly objectId: string | null;
+    }
+  | { readonly kind: 'detached'; readonly objectId: string };
+
+export type GitLockState =
+  | { readonly kind: 'unlocked' }
+  | { readonly kind: 'locked'; readonly reason: string | null };
+
+export type WorktreeAvailability =
+  | { readonly kind: 'available' }
+  | {
+      readonly kind: 'unavailable';
+      readonly reason: string;
+      readonly prunable: boolean;
+    };
+
+export interface RepositoryEngine {
+  open(anchor: AbsolutePath): Promise<RepositoryOpenResult>;
+}
+
+interface RepositoryIdentityState {
+  readonly evidence: string;
+  readonly repositoryId: RepositoryId;
+  generations: Map<string, WorktreeIdentityState>;
+}
+
+interface WorktreeIdentityState {
+  readonly evidence: string;
+  readonly generation: WorktreeGeneration;
+  readonly worktreeId: WorktreeId;
+}
+
+interface ResolvedAnchor {
+  readonly commonGitDirectory: AbsolutePath;
+  readonly repositoryEvidence: string;
+  readonly selectedWorktreePath: AbsolutePath;
+}
+
+interface CanonicalRegistration {
+  readonly canonicalPath: AbsolutePath;
+  readonly evidence: string;
+  readonly record: WorktreePorcelainRecord;
+  readonly unavailableReason: string | null;
+}
+
+export function createRepositoryEngine(): RepositoryEngine {
+  const ids = createOpaqueIdAuthority();
+  const repositories = new Map<string, RepositoryIdentityState>();
+
+  return {
+    async open(anchor) {
+      const resolved = await resolveAnchor(anchor);
+      if (resolved === null) {
+        return { kind: 'not_repository' };
+      }
+
+      let identity = repositories.get(resolved.commonGitDirectory);
+      if (
+        identity === undefined ||
+        identity.evidence !== resolved.repositoryEvidence
+      ) {
+        identity = {
+          evidence: resolved.repositoryEvidence,
+          repositoryId: ids.issue('repository'),
+          generations: new Map(),
+        };
+        repositories.set(resolved.commonGitDirectory, identity);
+      }
+
+      const inventory = await runGit(
+        [
+          '-C',
+          resolved.selectedWorktreePath,
+          'worktree',
+          'list',
+          '--porcelain',
+          '-z',
+        ],
+        true,
+      );
+      const records = parseWorktreeListPorcelain(inventory);
+      const registrations = await Promise.all(
+        records.map((record) => canonicalizeRegistration(record)),
+      );
+      const nextGenerations = new Map<string, WorktreeIdentityState>();
+      const seenPaths = new Set<string>();
+
+      const worktrees = registrations.map((registration, index) => {
+        if (seenPaths.has(registration.canonicalPath)) {
+          throw new Error(
+            `Git returned a duplicate Worktree registration for ${JSON.stringify(registration.canonicalPath)}.`,
+          );
+        }
+        seenPaths.add(registration.canonicalPath);
+
+        const previous = identity.generations.get(registration.canonicalPath);
+        const worktreeIdentity =
+          previous?.evidence === registration.evidence
+            ? previous
+            : issueWorktreeIdentity(ids, registration.evidence);
+        nextGenerations.set(registration.canonicalPath, worktreeIdentity);
+
+        return toDiscoveredWorktree(
+          registration,
+          worktreeIdentity,
+          index === 0 ? 'main' : 'linked',
+        );
+      });
+
+      identity.generations = nextGenerations;
+      const selectedWorktreeId =
+        worktrees.find(
+          ({ canonicalPath }) =>
+            canonicalPath === resolved.selectedWorktreePath,
+        )?.worktreeId ?? null;
+
+      return {
+        kind: 'repository',
+        repository: {
+          repositoryId: identity.repositoryId,
+          commonGitDirectory: resolved.commonGitDirectory,
+          selectedWorktreeId,
+          worktrees,
+        },
+      };
+    },
+  };
+}
+
+async function resolveAnchor(
+  anchor: AbsolutePath,
+): Promise<ResolvedAnchor | null> {
+  if (!isAbsolute(anchor)) {
+    throw new Error('The Current Project anchor must be an absolute path.');
+  }
+
+  let commonGitDirectoryOutput: Uint8Array;
+  try {
+    commonGitDirectoryOutput = await runGit(
+      ['-C', anchor, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+      false,
+    );
+  } catch (error) {
+    if (error instanceof GitCommandError && error.exitCode === 128) {
+      return null;
+    }
+    throw error;
+  }
+
+  const commonGitDirectory = asAbsolutePath(
+    await realpath(decodeLine(commonGitDirectoryOutput)),
+  );
+  const selectedWorktreePath = asAbsolutePath(
+    await realpath(
+      decodeLine(
+        await runGit(
+          [
+            '-C',
+            anchor,
+            'rev-parse',
+            '--path-format=absolute',
+            '--show-toplevel',
+          ],
+          false,
+        ),
+      ),
+    ),
+  );
+  const commonDirectoryStat = await stat(commonGitDirectory);
+
+  return {
+    commonGitDirectory,
+    repositoryEvidence: fileIdentity(commonDirectoryStat),
+    selectedWorktreePath,
+  };
+}
+
+async function canonicalizeRegistration(
+  record: WorktreePorcelainRecord,
+): Promise<CanonicalRegistration> {
+  let canonicalPath: AbsolutePath;
+  let unavailableReason: string | null = null;
+
+  try {
+    canonicalPath = asAbsolutePath(await realpath(record.path));
+  } catch (error) {
+    if (!isMissingPathError(error)) {
+      throw error;
+    }
+    canonicalPath = asAbsolutePath(resolve(record.path));
+    unavailableReason =
+      record.prunableReason ??
+      'The registered Working Tree path is unavailable.';
+  }
+
+  let evidence: string;
+  if (unavailableReason === null) {
+    try {
+      const gitDirectory = await realpath(
+        decodeLine(
+          await runGit(
+            [
+              '-C',
+              canonicalPath,
+              'rev-parse',
+              '--path-format=absolute',
+              '--git-dir',
+            ],
+            false,
+          ),
+        ),
+      );
+      evidence = `${canonicalPath}\0${gitDirectory}\0${fileIdentity(await stat(gitDirectory))}`;
+    } catch (error) {
+      if (!(error instanceof GitCommandError) || error.exitCode !== 128) {
+        throw error;
+      }
+      unavailableReason =
+        record.prunableReason ??
+        'The registered Working Tree cannot be resolved as a Git Worktree.';
+      evidence = unavailableEvidence(record, canonicalPath);
+    }
+  } else {
+    evidence = unavailableEvidence(record, canonicalPath);
+  }
+
+  return { canonicalPath, evidence, record, unavailableReason };
+}
+
+function toDiscoveredWorktree(
+  registration: CanonicalRegistration,
+  identity: WorktreeIdentityState,
+  role: 'main' | 'linked',
+): DiscoveredWorktree {
+  const { record } = registration;
+  return {
+    worktreeId: identity.worktreeId,
+    generation: identity.generation,
+    displayPath: record.path,
+    canonicalPath: registration.canonicalPath,
+    role,
+    head: toHead(record),
+    gitLock: record.locked
+      ? { kind: 'locked', reason: record.lockedReason }
+      : { kind: 'unlocked' },
+    availability:
+      registration.unavailableReason === null && !record.prunable
+        ? { kind: 'available' }
+        : {
+            kind: 'unavailable',
+            reason:
+              record.prunableReason ??
+              registration.unavailableReason ??
+              'The registered Working Tree is unavailable.',
+            prunable: record.prunable,
+          },
+  };
+}
+
+function toHead(record: WorktreePorcelainRecord): DiscoveredHead {
+  if (record.detached) {
+    if (record.head === null || ZERO_OBJECT_ID.test(record.head)) {
+      throw new Error('A detached Worktree must identify a Commit.');
+    }
+    return { kind: 'detached', objectId: record.head };
+  }
+  if (record.branch === null) {
+    throw new Error('An attached Worktree must identify a Local Branch.');
+  }
+  return {
+    kind: 'local_branch',
+    fullName: record.branch,
+    displayName: record.branch.startsWith('refs/heads/')
+      ? record.branch.slice('refs/heads/'.length)
+      : record.branch,
+    objectId:
+      record.head === null || ZERO_OBJECT_ID.test(record.head)
+        ? null
+        : record.head,
+  };
+}
+
+function issueWorktreeIdentity(
+  ids: OpaqueIdAuthority,
+  evidence: string,
+): WorktreeIdentityState {
+  return {
+    evidence,
+    generation: ids.issue('generation'),
+    worktreeId: ids.issue('worktree'),
+  };
+}
+
+function unavailableEvidence(
+  record: WorktreePorcelainRecord,
+  canonicalPath: AbsolutePath,
+): string {
+  return [
+    canonicalPath,
+    record.head ?? '',
+    record.branch ?? '',
+    record.detached ? 'detached' : 'attached',
+    record.prunable ? 'prunable' : 'registered',
+    record.prunableReason ?? '',
+  ].join('\0');
+}
+
+function fileIdentity(value: {
+  readonly birthtimeMs: number;
+  readonly dev: number;
+  readonly ino: number;
+}): string {
+  return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
+}
+
+function decodeLine(output: Uint8Array): string {
+  const value = new TextDecoder('utf-8', { fatal: true }).decode(output);
+  return value.endsWith('\r\n')
+    ? value.slice(0, -2)
+    : value.endsWith('\n')
+      ? value.slice(0, -1)
+      : value;
+}
+
+function runGit(
+  args: readonly string[],
+  allowLargeOutput: boolean,
+): Promise<Uint8Array> {
+  return new Promise((resolvePromise, reject) => {
+    execFile(
+      'git',
+      [...args],
+      {
+        encoding: 'buffer',
+        env: gitEnvironment(),
+        maxBuffer: allowLargeOutput ? GIT_OUTPUT_LIMIT_BYTES : 64 * 1_024,
+        timeout: GIT_TIMEOUT_MILLISECONDS,
+        windowsHide: true,
+      },
+      (error, stdout) => {
+        if (error !== null) {
+          reject(
+            new GitCommandError(
+              typeof error.code === 'number' ? error.code : null,
+              error.message,
+            ),
+          );
+          return;
+        }
+        resolvePromise(stdout);
+      },
+    );
+  });
+}
+
+function gitEnvironment(): NodeJS.ProcessEnv {
+  const environment = { ...process.env };
+  for (const key of [
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_COMMON_DIR',
+    'GIT_DIR',
+    'GIT_INDEX_FILE',
+    'GIT_NAMESPACE',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_PREFIX',
+    'GIT_WORK_TREE',
+  ]) {
+    delete environment[key];
+  }
+  environment.GIT_OPTIONAL_LOCKS = '0';
+  environment.LC_ALL = 'C';
+  return environment;
+}
+
+class GitCommandError extends Error {
+  constructor(
+    readonly exitCode: number | null,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'GitCommandError';
+  }
+}
+
+function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+  );
+}
+
+function asAbsolutePath(path: string): AbsolutePath {
+  return path as AbsolutePath;
+}
