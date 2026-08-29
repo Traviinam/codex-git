@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { realpath, stat } from 'node:fs/promises';
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute } from 'node:path';
 
 import {
   createOpaqueIdAuthority,
@@ -12,6 +12,7 @@ import {
 } from '@codex-git/protocol';
 
 import {
+  decodeForDisplay,
   parseWorktreeListPorcelain,
   type WorktreePorcelainRecord,
 } from './worktree-porcelain.js';
@@ -38,7 +39,8 @@ export interface DiscoveredWorktree {
   readonly worktreeId: WorktreeId;
   readonly generation: WorktreeGeneration;
   readonly displayPath: string;
-  readonly canonicalPath: AbsolutePath;
+  readonly canonicalPath: AbsolutePath | null;
+  readonly canonicalPathBytes: Uint8Array;
   readonly role: 'main' | 'linked';
   readonly head: DiscoveredHead;
   readonly gitLock: GitLockState;
@@ -67,7 +69,16 @@ export type WorktreeAvailability =
     };
 
 export interface RepositoryEngine {
-  open(anchor: AbsolutePath): Promise<RepositoryOpenResult>;
+  open(anchor: AbsolutePath): Promise<RepositorySession>;
+}
+
+/**
+ * The #6 session publishes discovery facts only. Revisioned refresh,
+ * subscriptions, and product operations are added by their owning issues.
+ */
+export interface RepositorySession {
+  snapshot(): Promise<RepositoryOpenResult>;
+  close(): Promise<void>;
 }
 
 interface RepositoryIdentityState {
@@ -89,92 +100,118 @@ interface ResolvedAnchor {
 }
 
 interface CanonicalRegistration {
-  readonly canonicalPath: AbsolutePath;
+  readonly canonicalPath: AbsolutePath | null;
+  readonly canonicalPathBytes: Uint8Array;
+  readonly pathKey: string;
   readonly evidence: string;
   readonly record: WorktreePorcelainRecord;
   readonly unavailableReason: string | null;
 }
 
 export function createRepositoryEngine(): RepositoryEngine {
-  const ids = createOpaqueIdAuthority();
-  const repositories = new Map<string, RepositoryIdentityState>();
-
   return {
     async open(anchor) {
       const resolved = await resolveAnchor(anchor);
+      const ids = createOpaqueIdAuthority();
+      let closed = false;
+
       if (resolved === null) {
-        return { kind: 'not_repository' };
-      }
-
-      let identity = repositories.get(resolved.commonGitDirectory);
-      if (
-        identity === undefined ||
-        identity.evidence !== resolved.repositoryEvidence
-      ) {
-        identity = {
-          evidence: resolved.repositoryEvidence,
-          repositoryId: ids.issue('repository'),
-          generations: new Map(),
+        return {
+          async snapshot() {
+            assertOpen(closed);
+            return { kind: 'not_repository' };
+          },
+          async close() {
+            closed = true;
+            ids.revokeAll();
+          },
         };
-        repositories.set(resolved.commonGitDirectory, identity);
       }
 
-      const inventory = await runGit(
-        [
-          '-C',
-          resolved.selectedWorktreePath,
-          'worktree',
-          'list',
-          '--porcelain',
-          '-z',
-        ],
-        true,
-      );
-      const records = parseWorktreeListPorcelain(inventory);
-      const registrations = await Promise.all(
-        records.map((record) => canonicalizeRegistration(record)),
-      );
-      const nextGenerations = new Map<string, WorktreeIdentityState>();
-      const seenPaths = new Set<string>();
-
-      const worktrees = registrations.map((registration, index) => {
-        if (seenPaths.has(registration.canonicalPath)) {
-          throw new Error(
-            `Git returned a duplicate Worktree registration for ${JSON.stringify(registration.canonicalPath)}.`,
-          );
-        }
-        seenPaths.add(registration.canonicalPath);
-
-        const previous = identity.generations.get(registration.canonicalPath);
-        const worktreeIdentity =
-          previous?.evidence === registration.evidence
-            ? previous
-            : issueWorktreeIdentity(ids, registration.evidence);
-        nextGenerations.set(registration.canonicalPath, worktreeIdentity);
-
-        return toDiscoveredWorktree(
-          registration,
-          worktreeIdentity,
-          index === 0 ? 'main' : 'linked',
-        );
-      });
-
-      identity.generations = nextGenerations;
-      const selectedWorktreeId =
-        worktrees.find(
-          ({ canonicalPath }) =>
-            canonicalPath === resolved.selectedWorktreePath,
-        )?.worktreeId ?? null;
+      const identity: RepositoryIdentityState = {
+        evidence: resolved.repositoryEvidence,
+        repositoryId: ids.issue('repository'),
+        generations: new Map(),
+      };
 
       return {
-        kind: 'repository',
-        repository: {
-          repositoryId: identity.repositoryId,
-          commonGitDirectory: resolved.commonGitDirectory,
-          selectedWorktreeId,
-          worktrees,
+        async snapshot() {
+          assertOpen(closed);
+          return discoverRepository(resolved, identity, ids);
+        },
+        async close() {
+          if (closed) {
+            return;
+          }
+          closed = true;
+          identity.generations.clear();
+          ids.revokeAll();
         },
       };
+    },
+  };
+}
+
+async function discoverRepository(
+  resolved: ResolvedAnchor,
+  identity: RepositoryIdentityState,
+  ids: OpaqueIdAuthority,
+): Promise<RepositoryOpenResult> {
+  const inventory = await runGit(
+    [
+      '--git-dir',
+      resolved.commonGitDirectory,
+      'worktree',
+      'list',
+      '--porcelain',
+      '-z',
+    ],
+    true,
+  );
+  const records = parseWorktreeListPorcelain(inventory);
+  const registrations = await Promise.all(
+    records.map((record) => canonicalizeRegistration(record)),
+  );
+  const nextGenerations = new Map<string, WorktreeIdentityState>();
+  const seenPaths = new Set<string>();
+
+  const worktrees = registrations.map((registration, index) => {
+    if (seenPaths.has(registration.pathKey)) {
+      throw new Error(
+        `Git returned a duplicate Worktree registration for ${JSON.stringify(decodeForDisplay(registration.canonicalPathBytes))}.`,
+      );
+    }
+    seenPaths.add(registration.pathKey);
+
+    const previous = identity.generations.get(registration.pathKey);
+    const retainsContinuousEvidence =
+      registration.unavailableReason === null && !registration.record.prunable;
+    const worktreeIdentity =
+      retainsContinuousEvidence && previous?.evidence === registration.evidence
+        ? previous
+        : issueWorktreeIdentity(ids, registration.evidence);
+    nextGenerations.set(registration.pathKey, worktreeIdentity);
+
+    return toDiscoveredWorktree(
+      registration,
+      worktreeIdentity,
+      index === 0 ? 'main' : 'linked',
+    );
+  });
+
+  identity.generations = nextGenerations;
+  const selectedWorktreeId =
+    worktrees.find(
+      ({ canonicalPath }) => canonicalPath === resolved.selectedWorktreePath,
+    )?.worktreeId ?? null;
+
+  return {
+    kind: 'repository',
+    repository: {
+      repositoryId: identity.repositoryId,
+      commonGitDirectory: resolved.commonGitDirectory,
+      selectedWorktreeId,
+      worktrees,
     },
   };
 }
@@ -230,53 +267,51 @@ async function resolveAnchor(
 async function canonicalizeRegistration(
   record: WorktreePorcelainRecord,
 ): Promise<CanonicalRegistration> {
-  let canonicalPath: AbsolutePath;
+  let canonicalPathBytes: Uint8Array;
   let unavailableReason: string | null = null;
+  const registeredPath = Buffer.from(record.pathBytes);
 
   try {
-    canonicalPath = asAbsolutePath(await realpath(record.path));
+    canonicalPathBytes = await realpath(registeredPath, {
+      encoding: 'buffer',
+    });
   } catch (error) {
     if (!isMissingPathError(error)) {
       throw error;
     }
-    canonicalPath = asAbsolutePath(resolve(record.path));
+    canonicalPathBytes = record.pathBytes.slice();
     unavailableReason =
       record.prunableReason ??
       'The registered Working Tree path is unavailable.';
   }
 
+  const pathKey = Buffer.from(canonicalPathBytes).toString('base64');
+  const canonicalPath = decodeAbsolutePath(canonicalPathBytes);
   let evidence: string;
   if (unavailableReason === null) {
     try {
-      const gitDirectory = await realpath(
-        decodeLine(
-          await runGit(
-            [
-              '-C',
-              canonicalPath,
-              'rev-parse',
-              '--path-format=absolute',
-              '--git-dir',
-            ],
-            false,
-          ),
-        ),
-      );
-      evidence = `${canonicalPath}\0${gitDirectory}\0${fileIdentity(await stat(gitDirectory))}`;
+      evidence = `${pathKey}\0${fileIdentity(await stat(Buffer.from(canonicalPathBytes)))}`;
     } catch (error) {
-      if (!(error instanceof GitCommandError) || error.exitCode !== 128) {
+      if (!isMissingPathError(error)) {
         throw error;
       }
       unavailableReason =
         record.prunableReason ??
         'The registered Working Tree cannot be resolved as a Git Worktree.';
-      evidence = unavailableEvidence(record, canonicalPath);
+      evidence = unavailableEvidence(record, pathKey);
     }
   } else {
-    evidence = unavailableEvidence(record, canonicalPath);
+    evidence = unavailableEvidence(record, pathKey);
   }
 
-  return { canonicalPath, evidence, record, unavailableReason };
+  return {
+    canonicalPath,
+    canonicalPathBytes,
+    pathKey,
+    evidence,
+    record,
+    unavailableReason,
+  };
 }
 
 function toDiscoveredWorktree(
@@ -288,8 +323,9 @@ function toDiscoveredWorktree(
   return {
     worktreeId: identity.worktreeId,
     generation: identity.generation,
-    displayPath: record.path,
+    displayPath: decodeForDisplay(record.pathBytes),
     canonicalPath: registration.canonicalPath,
+    canonicalPathBytes: registration.canonicalPathBytes.slice(),
     role,
     head: toHead(record),
     gitLock: record.locked
@@ -345,16 +381,25 @@ function issueWorktreeIdentity(
 
 function unavailableEvidence(
   record: WorktreePorcelainRecord,
-  canonicalPath: AbsolutePath,
+  pathKey: string,
 ): string {
   return [
-    canonicalPath,
+    pathKey,
     record.head ?? '',
     record.branch ?? '',
     record.detached ? 'detached' : 'attached',
     record.prunable ? 'prunable' : 'registered',
     record.prunableReason ?? '',
   ].join('\0');
+}
+
+function decodeAbsolutePath(pathBytes: Uint8Array): AbsolutePath | null {
+  try {
+    const path = new TextDecoder('utf-8', { fatal: true }).decode(pathBytes);
+    return isAbsolute(path) ? asAbsolutePath(path) : null;
+  } catch {
+    return null;
+  }
 }
 
 function fileIdentity(value: {
@@ -407,21 +452,20 @@ function runGit(
 
 function gitEnvironment(): NodeJS.ProcessEnv {
   const environment = { ...process.env };
-  for (const key of [
-    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-    'GIT_COMMON_DIR',
-    'GIT_DIR',
-    'GIT_INDEX_FILE',
-    'GIT_NAMESPACE',
-    'GIT_OBJECT_DIRECTORY',
-    'GIT_PREFIX',
-    'GIT_WORK_TREE',
-  ]) {
-    delete environment[key];
+  for (const key of Object.keys(environment)) {
+    if (key.startsWith('GIT_')) {
+      delete environment[key];
+    }
   }
   environment.GIT_OPTIONAL_LOCKS = '0';
   environment.LC_ALL = 'C';
   return environment;
+}
+
+function assertOpen(closed: boolean): void {
+  if (closed) {
+    throw new Error('Repository Session is closed.');
+  }
 }
 
 class GitCommandError extends Error {

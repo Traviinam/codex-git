@@ -1,8 +1,4 @@
 export {
-  parseWorktreeListPorcelain,
-  type WorktreePorcelainRecord,
-} from './worktree-porcelain.js';
-export {
   createRepositoryEngine,
   type DiscoveredHead,
   type DiscoveredWorktree,
@@ -10,5 +6,6 @@ export {
   type RepositoryDiscovery,
   type RepositoryEngine,
   type RepositoryOpenResult,
+  type RepositorySession,
   type WorktreeAvailability,
 } from './repository-engine.js';

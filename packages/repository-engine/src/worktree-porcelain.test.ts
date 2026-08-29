@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseWorktreeListPorcelain } from './index.js';
+import { parseWorktreeListPorcelain } from './worktree-porcelain.js';
 
 describe('parseWorktreeListPorcelain', () => {
   it('preserves NUL-delimited paths and classifies Git registration fields', () => {
@@ -21,7 +21,7 @@ describe('parseWorktreeListPorcelain', () => {
 
     expect(parseWorktreeListPorcelain(output)).toEqual([
       {
-        path: '/tmp/main tree',
+        pathBytes: Buffer.from('/tmp/main tree'),
         head: '1'.repeat(40),
         branch: 'refs/heads/main',
         detached: false,
@@ -32,7 +32,7 @@ describe('parseWorktreeListPorcelain', () => {
         prunableReason: null,
       },
       {
-        path: '/tmp/-linked\n工作树',
+        pathBytes: Buffer.from('/tmp/-linked\n工作树'),
         head: '2'.repeat(40),
         branch: null,
         detached: true,
@@ -63,5 +63,21 @@ describe('parseWorktreeListPorcelain', () => {
       prunable: true,
       prunableReason: null,
     });
+  });
+
+  it('preserves non-UTF-8 path bytes without decoding the full stream', () => {
+    const path = Buffer.concat([
+      Buffer.from('/tmp/non-utf8-'),
+      Buffer.from([0xff, 0xfe]),
+    ]);
+    const output = Buffer.concat([
+      Buffer.from('worktree '),
+      path,
+      Buffer.from(`\0HEAD ${'4'.repeat(40)}\0detached\0\0`),
+    ]);
+
+    const record = parseWorktreeListPorcelain(output)[0];
+
+    expect(record?.pathBytes).toEqual(path);
   });
 });

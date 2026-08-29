@@ -1,5 +1,5 @@
 export interface WorktreePorcelainRecord {
-  readonly path: string;
+  readonly pathBytes: Uint8Array;
   readonly head: string | null;
   readonly branch: string | null;
   readonly detached: boolean;
@@ -11,7 +11,7 @@ export interface WorktreePorcelainRecord {
 }
 
 interface MutableWorktreeRecord {
-  path?: string;
+  pathBytes?: Uint8Array;
   head?: string;
   branch?: string;
   detached: boolean;
@@ -28,7 +28,7 @@ const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 export function parseWorktreeListPorcelain(
   output: Uint8Array,
 ): readonly WorktreePorcelainRecord[] {
-  const fields = utf8Decoder.decode(output).split('\0');
+  const fields = splitNulFields(output);
   const records: WorktreePorcelainRecord[] = [];
   let record: MutableWorktreeRecord | undefined;
 
@@ -37,7 +37,7 @@ export function parseWorktreeListPorcelain(
       return;
     }
 
-    if (record.path === undefined) {
+    if (record.pathBytes === undefined) {
       throw new Error('Worktree porcelain record is missing its path.');
     }
     if (record.branch !== undefined && record.detached) {
@@ -47,7 +47,7 @@ export function parseWorktreeListPorcelain(
     }
 
     records.push({
-      path: record.path,
+      pathBytes: record.pathBytes,
       head: record.head ?? null,
       branch: record.branch ?? null,
       detached: record.detached,
@@ -66,9 +66,11 @@ export function parseWorktreeListPorcelain(
       continue;
     }
 
-    const separator = field.indexOf(' ');
-    const key = separator === -1 ? field : field.slice(0, separator);
-    const value = separator === -1 ? '' : field.slice(separator + 1);
+    const separator = field.indexOf(0x20);
+    const keyBytes = separator === -1 ? field : field.subarray(0, separator);
+    const valueBytes =
+      separator === -1 ? new Uint8Array() : field.subarray(separator + 1);
+    const key = decodeUtf8(keyBytes);
 
     if (key === 'worktree') {
       if (record !== undefined) {
@@ -76,11 +78,11 @@ export function parseWorktreeListPorcelain(
           'Worktree porcelain record started before the previous record ended.',
         );
       }
-      if (value.length === 0) {
+      if (valueBytes.length === 0) {
         throw new Error('Worktree porcelain path cannot be empty.');
       }
       record = {
-        path: value,
+        pathBytes: valueBytes.slice(),
         detached: false,
         bare: false,
         locked: false,
@@ -99,10 +101,10 @@ export function parseWorktreeListPorcelain(
 
     switch (key) {
       case 'HEAD':
-        record.head = value;
+        record.head = decodeForDisplay(valueBytes);
         break;
       case 'branch':
-        record.branch = value;
+        record.branch = decodeForDisplay(valueBytes);
         break;
       case 'detached':
         record.detached = true;
@@ -112,11 +114,13 @@ export function parseWorktreeListPorcelain(
         break;
       case 'locked':
         record.locked = true;
-        record.lockedReason = value.length === 0 ? null : value;
+        record.lockedReason =
+          valueBytes.length === 0 ? null : decodeForDisplay(valueBytes);
         break;
       case 'prunable':
         record.prunable = true;
-        record.prunableReason = value.length === 0 ? null : value;
+        record.prunableReason =
+          valueBytes.length === 0 ? null : decodeForDisplay(valueBytes);
         break;
       default:
         // Porcelain may grow additive fields; inventory remains usable when it does.
@@ -126,4 +130,33 @@ export function parseWorktreeListPorcelain(
 
   finishRecord();
   return records;
+}
+
+function splitNulFields(output: Uint8Array): readonly Uint8Array[] {
+  const fields: Uint8Array[] = [];
+  let start = 0;
+  for (let index = 0; index < output.length; index += 1) {
+    if (output[index] === 0) {
+      fields.push(output.subarray(start, index));
+      start = index + 1;
+    }
+  }
+  fields.push(output.subarray(start));
+  return fields;
+}
+
+export function decodeForDisplay(bytes: Uint8Array): string {
+  try {
+    return decodeUtf8(bytes);
+  } catch {
+    return Array.from(bytes, (byte) =>
+      byte >= 0x20 && byte <= 0x7e && byte !== 0x5c
+        ? String.fromCharCode(byte)
+        : `\\x${byte.toString(16).padStart(2, '0')}`,
+    ).join('');
+  }
+}
+
+function decodeUtf8(bytes: Uint8Array): string {
+  return utf8Decoder.decode(bytes);
 }
