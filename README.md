@@ -25,7 +25,7 @@ npm ci
 npm run dev
 ```
 
-The launcher attaches the placeholder Git Surface through the standalone Host Adapter and prints its URL plus the loopback health URL. The surface uses port `5173` by default; `CODEX_GIT_SURFACE_PORT` and `CODEX_GIT_PORT` override the listener ports.
+The launcher attaches the placeholder Git Surface through the standalone Host Adapter and prints its URL plus the loopback health URL. The surface uses port `5173` by default, and `CODEX_GIT_SURFACE_PORT` overrides that listener port. The protocol server always uses an operating-system-assigned loopback port.
 
 The server scaffold can also be started separately:
 

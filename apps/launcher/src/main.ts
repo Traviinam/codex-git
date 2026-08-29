@@ -3,7 +3,6 @@ import { resolve } from 'node:path';
 import { startCodexRuntime } from './index.js';
 
 const runtime = await startCodexRuntime({
-  healthPort: readPort('CODEX_GIT_PORT', 0),
   projectPath: resolve(process.env.CODEX_GIT_PROJECT_PATH ?? process.cwd()),
   surfacePort: readPort('CODEX_GIT_SURFACE_PORT', 5173),
 });
