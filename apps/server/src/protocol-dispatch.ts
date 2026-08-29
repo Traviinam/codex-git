@@ -70,6 +70,7 @@ const boundedEnvelope = (textBytes: number) =>
   defaultResponseBodyBytes + textBytes * 6;
 const branchResponseBodyBytes = boundedEnvelope(5_000 * 1_024);
 const diffResponseBodyBytes = boundedEnvelope(PROTOCOL_LIMITS.diffOutputBytes);
+const operationResponseBodyBytes = boundedEnvelope(1_000 * (8_192 + 256));
 const snapshotResponseBodyBytes = boundedEnvelope(2_000 * 4_096);
 
 export const PROTOCOL_ENDPOINTS = {
@@ -82,7 +83,7 @@ export const PROTOCOL_ENDPOINTS = {
     method: 'POST',
     responseBodyBytes: defaultResponseBodyBytes,
   },
-  operations: { method: 'POST', responseBodyBytes: defaultResponseBodyBytes },
+  operations: { method: 'POST', responseBodyBytes: operationResponseBodyBytes },
   session: { method: 'GET', responseBodyBytes: defaultResponseBodyBytes },
   snapshot: { method: 'GET', responseBodyBytes: snapshotResponseBodyBytes },
 } as const;
@@ -107,6 +108,8 @@ export interface ProtocolDispatcher {
 
 const diagnosticKeys = new Set(['message', 'reason']);
 const fatalUtf8Decoder = new TextDecoder('utf-8', { fatal: true });
+const actionKey = (actions: Set<NativeActionKind>) =>
+  JSON.stringify([...actions].sort());
 
 export function redactProtocolDiagnostics(
   value: unknown,
@@ -310,8 +313,11 @@ function collectNativeActions(
       ...worktree.changes.flatMap((change) => change.nativeTargets),
     ];
     for (const descriptor of descriptors) {
-      if (issued.has(descriptor.targetId)) return undefined;
-      issued.set(descriptor.targetId, new Set(descriptor.actions));
+      const actions = new Set(descriptor.actions);
+      const existing = issued.get(descriptor.targetId);
+      if (existing && actionKey(existing) !== actionKey(actions))
+        return undefined;
+      issued.set(descriptor.targetId, actions);
     }
   }
   return issued;

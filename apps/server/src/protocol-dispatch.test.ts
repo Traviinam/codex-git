@@ -548,18 +548,20 @@ describe('protocol HTTP dispatch', () => {
   it('routes operation recovery by opaque Operation ID', async () => {
     const operationId = 'operation_33333333333333333333333333333333';
     const launchToken = 'ab'.repeat(32);
+    const diagnostic = 'Authorization: Bearer fixture-operation-token';
+    const padding = 'x'.repeat(8_192 - launchToken.length);
     const result = operationResultSchema.parse({
       kind: 'partial_success',
       operationId,
-      message: `Recovery retained ${launchToken}`,
+      message: `${launchToken}${padding}`,
       effects: [
-        { kind: 'succeeded', label: 'origin' },
-        {
+        { kind: 'succeeded', label: 'x'.repeat(256) },
+        ...Array.from({ length: 999 }, (_, index) => ({
           kind: 'failed_known',
-          label: 'backup',
+          label: 'x'.repeat(256),
           code: 'authentication',
-          message: 'Authorization: Bearer fixture-operation-token',
-        },
+          message: index === 0 ? diagnostic : 'x'.repeat(8_192),
+        })),
       ],
     });
     const recoverOperation = vi.fn(() => result);
@@ -575,23 +577,18 @@ describe('protocol HTTP dispatch', () => {
       await fetch(server.sessionUrl, { headers })
     ).json()) as { capabilities: { operationRecovery: boolean } };
 
-    const responseBody = await response.json();
-    expect({
-      capability: session.capabilities.operationRecovery,
-      resultIsValid: operationResultSchema.safeParse(responseBody).success,
-      status: response.status,
-    }).toEqual({ capability: true, resultIsValid: true, status: 200 });
-    expect(responseBody).toMatchObject({
-      message: 'Recovery retained [REDACTED]',
-      effects: [
-        { kind: 'succeeded' },
-        { message: 'Authorization: [REDACTED]' },
-      ],
+    const responseBody = operationResultSchema.parse(await response.json());
+    expect(session.capabilities.operationRecovery).toBe(true);
+    expect(response.status).toBe(200);
+    if (responseBody.kind !== 'partial_success') throw new Error('unreachable');
+    expect(responseBody.message).toBe(`[REDACTED]${padding}`);
+    expect(responseBody.effects).toHaveLength(1_000);
+    expect(responseBody.effects[1]).toMatchObject({
+      message: 'Authorization: [REDACTED]',
     });
-    expect(JSON.stringify(responseBody)).not.toContain(launchToken);
-    expect(JSON.stringify(responseBody)).not.toContain(
-      'fixture-operation-token',
-    );
+    const serialized = JSON.stringify(responseBody);
+    expect(serialized).not.toContain(launchToken);
+    expect(serialized).not.toContain('fixture-operation-token');
     expect(recoverOperation).toHaveBeenCalledWith(operationId);
   });
 
@@ -643,35 +640,35 @@ describe('protocol HTTP dispatch', () => {
 
   it('rejects an action that was not issued for the native target', async () => {
     const targetId = 'native_77777777777777777777777777777777';
-    let duplicate = false;
+    const actions = ['copy_relative_path', 'reveal_in_finder'] as const;
+    let duplicate: readonly string[] | undefined;
     const perform = vi.fn(() => ({ kind: 'performed' as const }));
     const server = await startLoopbackServer({
       allowedOrigins: ['null'],
       handlers: {
-        snapshot: () =>
-          nativeSnapshot(targetId, ['copy_relative_path'], duplicate),
+        snapshot: () => nativeSnapshot(targetId, actions, duplicate),
         nativeActions: perform,
       },
     });
     servers.push(server);
 
-    await fetch(endpointUrl(server, 'snapshot'), { headers });
+    const snapshotUrl = endpointUrl(server, 'snapshot');
+    await fetch(snapshotUrl, { headers });
     const response = await postJson(server, 'native-actions', {
       kind: 'open_default_app',
       targetId,
     });
 
-    expect({ result: await response.json(), status: response.status }).toEqual({
-      result: staleTargetResponse,
-      status: 409,
-    });
+    expect(await response.json()).toEqual(staleTargetResponse);
+    expect(response.status).toBe(409);
     expect(perform).not.toHaveBeenCalled();
 
-    duplicate = true;
-    const duplicateResponse = await fetch(endpointUrl(server, 'snapshot'), {
-      headers,
-    });
-    await expectInvalidHandlerResponse(duplicateResponse);
+    duplicate = ['reveal_in_finder', 'copy_relative_path'];
+    const identicalResponse = await fetch(snapshotUrl, { headers });
+    expect(identicalResponse.status).toBe(200);
+    duplicate = ['copy_relative_path'];
+    const conflictingResponse = await fetch(snapshotUrl, { headers });
+    await expectInvalidHandlerResponse(conflictingResponse);
   });
 
   it('performs an allow-listed native action against its exact opaque target', async () => {
@@ -770,7 +767,7 @@ async function expectInvalidHandlerResponse(response: Response) {
 function nativeSnapshot(
   targetId: string,
   actions: readonly string[],
-  duplicate = false,
+  duplicate?: readonly string[],
 ): ReturnType<typeof repositorySnapshotSchema.parse> {
   return repositorySnapshotSchema.parse({
     repositoryId: 'repository_99999999999999999999999999999999',
@@ -790,7 +787,7 @@ function nativeSnapshot(
         changes: [],
         nativeTargets: [
           { targetId, actions },
-          ...(duplicate ? [{ targetId, actions }] : []),
+          ...(duplicate ? [{ targetId, actions: duplicate }] : []),
         ],
       },
     ],
