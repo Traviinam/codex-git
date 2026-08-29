@@ -60,10 +60,14 @@ export async function startCodexRuntime(
           return;
         }
         host = 'standalone';
-        await connection?.close();
-        await instance?.close();
+        const attachedConnection = connection;
+        const dedicatedInstance = instance;
         connection = null;
         instance = null;
+        await Promise.allSettled([
+          attachedConnection?.close(),
+          dedicatedInstance?.close(),
+        ]);
       });
     }
   } catch {
@@ -80,10 +84,19 @@ export async function startCodexRuntime(
         return;
       }
       closing = true;
-      await connection?.close();
-      await instance?.close();
-      await monitor;
-      await standalone.close();
+      const results = await Promise.allSettled([
+        connection?.close(),
+        instance?.close(),
+        monitor,
+        standalone.close(),
+      ]);
+      const failure = results.find(
+        (result): result is PromiseRejectedResult =>
+          result.status === 'rejected',
+      );
+      if (failure !== undefined) {
+        throw failure.reason;
+      }
     },
   };
 }

@@ -233,9 +233,12 @@ class ManagedDedicatedConnection implements HostConnection {
       this.rendererSubscription();
       await this.replacement;
     }
-    await this.renderer.close();
-    this.contextStream.close();
-    this.transitionStream.close();
+    try {
+      await this.renderer.close();
+    } finally {
+      this.contextStream.close();
+      this.transitionStream.close();
+    }
   }
 }
 

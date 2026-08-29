@@ -56,7 +56,8 @@ Codex Desktop `26.820.60940` (build `7119`) and Chromium `151.0.7922.170`.
 - Select a native destination and confirm native content is restored with no
   hidden overlay.
 - Open `Git` again after a renderer reload and confirm one new frame generation.
-- Change Current Project, theme, and task and confirm typed context updates.
+- Change theme/task and confirm typed context updates; change Current Project
+  and confirm a typed standalone-required transition.
 - Send missing, altered, replayed, and stale capability/challenge messages and
   confirm they cause no action.
 - Close the connection and confirm all nodes, listeners, CDP sessions, and the
