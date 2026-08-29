@@ -127,15 +127,12 @@ class Coordinator implements OperationCoordinator {
   ): Promise<OperationAdmission> {
     const coordination = derive(operation);
     assertHooks(operation);
-    let conflicts = this.#conflicts(coordination);
+    const conflicts = this.#conflicts(coordination);
 
     const unknown = conflicts.filter(
       (record) => record.result?.kind === 'unknown_outcome',
     );
-    if (unknown.length > 0) {
-      await Promise.all(unknown.map((record) => this.#reconcile(record)));
-      conflicts = this.#conflicts(coordination);
-    }
+    for (const record of unknown) void this.#reconcile(record);
 
     if (conflicts.length > 0) {
       return this.#rejectBusy(operation, coordination, conflicts);
@@ -174,11 +171,7 @@ class Coordinator implements OperationCoordinator {
     conflicts: readonly RecordState[],
   ): Promise<OperationAdmission> {
     const conflictSummaries = conflicts.map(summary);
-    try {
-      await operation.reconcileBusy({ conflicts: conflictSummaries });
-    } catch {
-      // A live conflicting lease is still sufficient evidence for Busy.
-    }
+    await operation.reconcileBusy({ conflicts: conflictSummaries });
 
     const record = this.#record(operation, coordination, false, 'terminal');
     const result = withId(record.id, {
@@ -318,8 +311,10 @@ function derive(operation: CoordinatedOperation<unknown>): Coordination {
           'target must identify a Local or Remote-tracking Branch.',
         );
       }
-      claimRef(claims, operation.target.fullName, 'target.fullName');
-      if (operation.target.kind === 'remote_tracking') {
+      if (operation.target.kind === 'local') {
+        claimBranchRef(claims, operation.target.fullName, 'refs/heads/');
+      } else {
+        claimBranchRef(claims, operation.target.fullName, 'refs/remotes/');
         claimRemote(claims, operation.target.remoteId, 'target.remoteId');
       }
       return { category: 'branch_switch', claims, lane: 'branch' };
@@ -409,6 +404,17 @@ function claimRemote(claims: Set<string>, value: RemoteId, field: string) {
     throw new Error(`${field} must be an opaque Remote ID.`);
   }
   claims.add(key('remote', value));
+}
+
+function claimBranchRef(
+  claims: Set<string>,
+  value: string,
+  namespace: 'refs/heads/' | 'refs/remotes/',
+) {
+  if (typeof value !== 'string' || !value.startsWith(namespace)) {
+    throw new Error(`target.fullName must be in ${namespace}.`);
+  }
+  claimRef(claims, value, 'target.fullName');
 }
 
 function assertHooks(operation: CoordinatedOperation<unknown>) {

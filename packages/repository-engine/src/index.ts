@@ -1,14 +1,4 @@
 export {
-  createOperationCoordinator,
-  type BranchTarget,
-  type CoordinatedOperation,
-  type CoordinatedOperationSummary,
-  type OperationAdmission,
-  type OperationCoordinator,
-  type OperationExecution,
-  type ReconciledOperationResult,
-} from './operation-coordinator.js';
-export {
   createRepositoryEngine,
   type DiscoveredHead,
   type DiscoveredWorktree,

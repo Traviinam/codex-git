@@ -91,6 +91,28 @@ describe('operation coordinator admission', () => {
     );
   });
 
+  it('propagates Busy reconciliation failure without publishing Busy', async () => {
+    const activeExecution = deferred<string>();
+    const coordinator = createOperationCoordinator();
+    const worktreeGeneration = generation('3');
+    const active = await coordinator.dispatch(
+      stageOperation(worktreeGeneration, activeExecution.promise),
+    );
+    const reconciliationFailure = new Error('Fresh state is unavailable.');
+
+    await expect(
+      coordinator.dispatch({
+        ...commitOperation(worktreeGeneration, 'refs/heads/topic', 'blocked'),
+        reconcileBusy: async () => {
+          throw reconciliationFailure;
+        },
+      }),
+    ).rejects.toBe(reconciliationFailure);
+
+    activeExecution.resolve('active evidence');
+    await coordinator.recover(acceptedId(active));
+  });
+
   it('derives Repository lanes and mandatory cross-lane claims', async () => {
     const commitExecution = deferred<string>();
     const branchExecution = deferred<string>();
@@ -196,7 +218,32 @@ describe('operation coordinator admission', () => {
     await coordinator.recover(acceptedId(branch));
   });
 
-  it('deduplicates automatic reconciliation of an Unknown conflicting lease', async () => {
+  it('rejects Branch targets outside their declared ref namespace', async () => {
+    const coordinator = createOperationCoordinator();
+    const localMismatch = branchOperation(
+      generation('7'),
+      localTarget('refs/remotes/origin/topic'),
+      'must not run',
+    );
+    const remoteMismatch = branchOperation(
+      generation('7'),
+      {
+        kind: 'remote_tracking',
+        fullName: 'refs/heads/topic',
+        remoteId: remote('2'),
+      },
+      'must not run',
+    );
+
+    await expect(coordinator.dispatch(localMismatch)).rejects.toThrow(
+      'refs/heads/',
+    );
+    await expect(coordinator.dispatch(remoteMismatch)).rejects.toThrow(
+      'refs/remotes/',
+    );
+  });
+
+  it('reconciles an Unknown lease in the background without queueing admissions', async () => {
     const recovered = deferred<ReconciledOperationResult>();
     const coordinator = createOperationCoordinator();
     const worktreeGeneration = generation('8');
@@ -224,17 +271,33 @@ describe('operation coordinator admission', () => {
     );
     await Promise.resolve();
     expect(reconciliations).toBe(2);
-    recovered.resolve(succeeded);
 
-    const admissions = await Promise.all([next, concurrent]);
+    const admissions = await Promise.race([
+      Promise.all([next, concurrent]),
+      new Promise<'timed_out'>((resolve) => {
+        setTimeout(() => resolve('timed_out'), 50);
+      }),
+    ]);
+    expect(admissions).not.toBe('timed_out');
+    if (admissions === 'timed_out') throw new Error('Admissions were queued.');
     expect(admissions.filter(({ kind }) => kind === 'accepted')).toHaveLength(
-      1,
+      0,
     );
     expect(admissions.filter(({ kind }) => kind === 'rejected')).toHaveLength(
-      1,
+      2,
     );
-    const accepted = admissions.find(({ kind }) => kind === 'accepted');
-    if (accepted !== undefined) await coordinator.recover(acceptedId(accepted));
+
+    recovered.resolve(succeeded);
+    await expect(coordinator.recover(acceptedId(first))).resolves.toMatchObject(
+      {
+        kind: 'succeeded',
+      },
+    );
+    const retry = await coordinator.dispatch(
+      stageOperation(worktreeGeneration, 'retry'),
+    );
+    expect(retry.kind).toBe('accepted');
+    await coordinator.recover(acceptedId(retry));
   });
 
   it('derives the terminal result from reconciliation rather than process state', async () => {
