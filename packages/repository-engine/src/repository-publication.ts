@@ -114,10 +114,17 @@ export function createRepositoryPublicationSession(
             refresh: deepFreeze({ kind: 'failed', error: refreshError }),
           };
         }
+        const staleRefresh = deepFreeze({
+          kind: 'stale',
+          error: refreshError,
+        } satisfies RefreshState);
+        if (sameExternalState(published.refresh, staleRefresh)) {
+          return { kind: 'repository', repository: published };
+        }
         const stale = deepFreeze({
           ...published,
           repositoryRevision: published.repositoryRevision + 1,
-          refresh: { kind: 'stale', error: refreshError },
+          refresh: staleRefresh,
         } satisfies RepositorySnapshot);
         published = stale;
         invalidations.publish({
@@ -138,6 +145,9 @@ export function createRepositoryPublicationSession(
       }
       const next = publishDiscovery(candidate.discovery, published);
       candidate.commit();
+      if (published !== undefined && sameExternalState(published, next)) {
+        return { kind: 'repository', repository: published };
+      }
       published = next;
       invalidations.publish({
         kind: 'repository',
@@ -189,7 +199,8 @@ export function publishDiscovery(
   const worktrees = discovery.worktrees.map((worktree) => {
     const prior = previousWorktrees.get(worktree.worktreeId);
     const changed =
-      prior === undefined || headEvidence(worktree) !== headEvidence(prior);
+      prior === undefined ||
+      worktreeEvidence(worktree) !== worktreeEvidence(prior);
     worktreeChanged ||= changed;
     const published: Omit<DiscoveredWorktree, 'canonicalPathBytes'> = {
       worktreeId: worktree.worktreeId,
@@ -211,6 +222,9 @@ export function publishDiscovery(
   const topologyChanged =
     previous === undefined ||
     topologyEvidence(discovery) !== topologyEvidence(previous);
+  const selectionChanged =
+    previous === undefined ||
+    discovery.selectedWorktreeId !== previous.selectedWorktreeId;
   const recovered = previous !== undefined && previous.refresh.kind !== 'fresh';
 
   return deepFreeze({
@@ -221,7 +235,9 @@ export function publishDiscovery(
       previous === undefined
         ? 1
         : previous.repositoryRevision +
-          (topologyChanged || worktreeChanged || recovered ? 1 : 0),
+          (topologyChanged || worktreeChanged || selectionChanged || recovered
+            ? 1
+            : 0),
     topologyRevision:
       previous === undefined
         ? 1
@@ -234,37 +250,37 @@ export function publishDiscovery(
 
 function topologyEvidence(repository: {
   readonly repositoryId: RepositoryDiscovery['repositoryId'];
-  readonly selectedWorktreeId: RepositoryDiscovery['selectedWorktreeId'];
   readonly worktrees: readonly Pick<
     PublishedWorktreeSnapshot,
     | 'availability'
     | 'canonicalPath'
     | 'displayPath'
     | 'generation'
-    | 'gitLock'
     | 'role'
     | 'worktreeId'
   >[];
 }): string {
   return JSON.stringify({
     repositoryId: repository.repositoryId,
-    selectedWorktreeId: repository.selectedWorktreeId,
     worktrees: repository.worktrees.map((worktree) => ({
       availability: worktree.availability,
       canonicalPath: worktree.canonicalPath,
       displayPath: worktree.displayPath,
       generation: worktree.generation,
-      gitLock: worktree.gitLock,
       role: worktree.role,
       worktreeId: worktree.worktreeId,
     })),
   });
 }
 
-function headEvidence(
-  worktree: Pick<PublishedWorktreeSnapshot, 'head'>,
+function worktreeEvidence(
+  worktree: Pick<PublishedWorktreeSnapshot, 'gitLock' | 'head'>,
 ): string {
-  return JSON.stringify(worktree.head);
+  return JSON.stringify({ head: worktree.head, gitLock: worktree.gitLock });
+}
+
+function sameExternalState(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function deepFreeze<T>(value: T): T {

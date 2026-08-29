@@ -69,10 +69,6 @@ export interface RepositoryEngine {
   open(anchor: AbsolutePath): Promise<RepositorySession>;
 }
 
-/**
- * The #6 session publishes discovery facts only. Revisioned refresh,
- * subscriptions, and product operations are added by their owning issues.
- */
 interface RepositoryIdentityState {
   readonly evidence: string;
   readonly repositoryId: RepositoryId;

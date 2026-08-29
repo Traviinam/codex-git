@@ -1,4 +1,11 @@
-import { access, chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import {
+  access,
+  chmod,
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -54,10 +61,66 @@ describe('Repository snapshot publication', () => {
     expect(Object.isFrozen(published.worktrees[0]?.availability)).toBe(true);
     expect('canonicalPathBytes' in published.worktrees[0]!).toBe(false);
 
+    const events = session.subscribe()[Symbol.asyncIterator]();
     const repeated = await snapshotRepository(session);
     expect(repeated.repositoryRevision).toBe(published.repositoryRevision);
     expect(repeated.topologyRevision).toBe(published.topologyRevision);
     expect(repeated.refsRevision).toBe(published.refsRevision);
+    await expect(noEvent(events)).resolves.toBe(true);
+    await session.close();
+  });
+
+  it('advances only Worktree and Repository revisions for Git lock changes', async () => {
+    const repository = await createRepositoryWithCommit();
+    const linkedPath = `${repository.path}-locked`;
+    externalPaths.push(linkedPath);
+    await repository.git('worktree', 'add', '--quiet', '--detach', linkedPath);
+    const canonicalLinkedPath = await realpath(linkedPath);
+    const session = await createRepositoryEngine().open(
+      asAbsolutePath(repository.path),
+    );
+    const initial = await snapshotRepository(session);
+    const initialMain = initial.worktrees.find(({ role }) => role === 'main')!;
+    const initialLinked = initial.worktrees.find(
+      ({ canonicalPath }) => canonicalPath === canonicalLinkedPath,
+    )!;
+
+    await repository.git(
+      'worktree',
+      'lock',
+      '--reason',
+      'review fixture',
+      linkedPath,
+    );
+    const locked = await snapshotRepository(session);
+    const lockedMain = locked.worktrees.find(({ role }) => role === 'main')!;
+    const lockedLinked = locked.worktrees.find(
+      ({ canonicalPath }) => canonicalPath === canonicalLinkedPath,
+    )!;
+
+    expect(locked.repositoryRevision).toBe(initial.repositoryRevision + 1);
+    expect(locked.topologyRevision).toBe(initial.topologyRevision);
+    expect(lockedMain.worktreeRevision).toBe(initialMain.worktreeRevision);
+    expect(lockedLinked.worktreeRevision).toBe(
+      initialLinked.worktreeRevision + 1,
+    );
+    expect(lockedLinked.gitLock).toEqual({
+      kind: 'locked',
+      reason: 'review fixture',
+    });
+
+    await repository.git('worktree', 'unlock', linkedPath);
+    const unlocked = await snapshotRepository(session);
+    const unlockedLinked = unlocked.worktrees.find(
+      ({ canonicalPath }) => canonicalPath === canonicalLinkedPath,
+    )!;
+    expect(unlocked.repositoryRevision).toBe(locked.repositoryRevision + 1);
+    expect(unlocked.topologyRevision).toBe(locked.topologyRevision);
+    expect(unlockedLinked.worktreeRevision).toBe(
+      lockedLinked.worktreeRevision + 1,
+    );
+    expect(unlockedLinked.gitLock).toEqual({ kind: 'unlocked' });
+    await session.close();
   });
 
   it('does not publish or notify a superseded snapshot that completes late', async () => {
@@ -192,6 +255,7 @@ describe('Repository snapshot publication', () => {
     process.env.PATH = `${wrapperDirectory}:${previousPath ?? ''}`;
 
     try {
+      const staleEvents = session.subscribe()[Symbol.asyncIterator]();
       const failed = await snapshotRepository(session);
 
       expect(failed.refresh).toEqual({
@@ -205,6 +269,20 @@ describe('Repository snapshot publication', () => {
       expect(failed.topologyRevision).toBe(lastGood.topologyRevision);
       expect(failed.refsRevision).toBe(lastGood.refsRevision);
       expect(failed.worktrees).toEqual(lastGood.worktrees);
+      await expect(staleEvents.next()).resolves.toEqual({
+        done: false,
+        value: {
+          kind: 'repository',
+          repositoryRevision: failed.repositoryRevision,
+          refresh: failed.refresh,
+        },
+      });
+
+      const repeatedEvents = session.subscribe()[Symbol.asyncIterator]();
+      const repeated = await snapshotRepository(session);
+      expect(repeated.repositoryRevision).toBe(failed.repositoryRevision);
+      expect(repeated.refresh).toEqual(failed.refresh);
+      await expect(noEvent(repeatedEvents)).resolves.toBe(true);
 
       if (previousPath === undefined) {
         delete process.env.PATH;
@@ -337,8 +415,12 @@ async function waitForPath(path: string): Promise<void> {
 }
 
 async function noEvent(events: AsyncIterator<unknown>): Promise<boolean> {
-  return Promise.race([
+  const empty = await Promise.race([
     events.next().then(() => false),
     new Promise<true>((resolve) => setTimeout(() => resolve(true), 50)),
   ]);
+  if (empty) {
+    await events.return?.();
+  }
+  return empty;
 }
