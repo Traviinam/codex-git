@@ -1,4 +1,13 @@
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  access,
+  chmod,
+  mkdtemp,
+  mkdir,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
@@ -59,6 +68,77 @@ describe('Repository Engine discovery', () => {
       fullName: expect.stringMatching(/^refs\/heads\//u),
       objectId: null,
     });
+  });
+
+  it('invalidates the session when the Repository is replaced at the same path', async () => {
+    const repository = await createRepositoryWithCommit();
+    const engine = createRepositoryEngine();
+    const session = await engine.open(asAbsolutePath(repository.path));
+    const original = await snapshotRepository(session);
+    await rename(
+      join(repository.path, '.git'),
+      join(repository.path, '.git-replaced'),
+    );
+    await repository.git('init', '--quiet');
+
+    await expect(session.snapshot()).rejects.toThrow(
+      'Repository Session is invalid because the Repository was replaced.',
+    );
+
+    const replacement = await openRepository(engine, repository.path);
+    expect(replacement.repositoryId).not.toBe(original.repositoryId);
+  });
+
+  it('does not publish an in-flight snapshot after the session closes', async () => {
+    const repository = await createRepositoryWithCommit();
+    const session = await createRepositoryEngine().open(
+      asAbsolutePath(repository.path),
+    );
+    const wrapperDirectory = await mkdtemp(
+      join(tmpdir(), 'codex-git-delayed-git-'),
+    );
+    externalPaths.push(wrapperDirectory);
+    const wrapper = join(wrapperDirectory, 'git');
+    const marker = join(wrapperDirectory, 'started');
+    const release = join(wrapperDirectory, 'release');
+    await writeFile(
+      wrapper,
+      [
+        '#!/bin/sh',
+        'if [ "$1" = "--git-dir" ]; then',
+        '  : > "$CODEX_GIT_TEST_MARKER"',
+        '  while [ ! -e "$CODEX_GIT_TEST_RELEASE" ]; do sleep 0.01; done',
+        'fi',
+        'exec /usr/bin/git "$@"',
+        '',
+      ].join('\n'),
+    );
+    await chmod(wrapper, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${wrapperDirectory}:${previousPath ?? ''}`;
+    process.env.CODEX_GIT_TEST_MARKER = marker;
+    process.env.CODEX_GIT_TEST_RELEASE = release;
+
+    try {
+      const snapshot = session.snapshot();
+      await waitForPath(marker);
+      await session.close();
+      await writeFile(release, 'continue\n');
+
+      await expect(snapshot).rejects.toThrow('Repository Session is closed.');
+      await expect(session.snapshot()).rejects.toThrow(
+        'Repository Session is closed.',
+      );
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+      delete process.env.CODEX_GIT_TEST_MARKER;
+      delete process.env.CODEX_GIT_TEST_RELEASE;
+      await writeFile(release, 'continue\n');
+    }
   });
 
   it('resolves the anchor independently of inherited Git directory overrides', async () => {
@@ -205,6 +285,75 @@ describe('Repository Engine discovery', () => {
         displayPath.endsWith('-disappearing'),
       )?.availability,
     ).toMatchObject({ kind: 'unavailable', prunable: true });
+  });
+
+  it('marks a registered Worktree unavailable when its Git file is broken', async () => {
+    const repository = await createRepositoryWithCommit();
+    const linkedPath = join(
+      dirname(repository.path),
+      `${basename(repository.path)}-broken-git-file`,
+    );
+    externalPaths.push(linkedPath);
+    await repository.git(
+      'worktree',
+      'add',
+      '--quiet',
+      '-b',
+      'feature/broken-git-file',
+      linkedPath,
+    );
+    const session = await createRepositoryEngine().open(
+      asAbsolutePath(repository.path),
+    );
+    await writeFile(
+      join(linkedPath, '.git'),
+      'gitdir: /definitely/missing/codex-git-admin\n',
+    );
+
+    const result = await snapshotRepository(session);
+    const broken = findWorktree(result, await realpath(linkedPath));
+
+    expect(broken.availability).toEqual({
+      kind: 'unavailable',
+      reason:
+        'The registered Working Tree cannot be resolved as its Git registration.',
+      prunable: false,
+    });
+  });
+
+  it('marks a registration unavailable when its Git file targets another Repository', async () => {
+    const repository = await createRepositoryWithCommit();
+    const unrelated = await createRepositoryWithCommit();
+    const linkedPath = join(
+      dirname(repository.path),
+      `${basename(repository.path)}-redirected-git-file`,
+    );
+    externalPaths.push(linkedPath);
+    await repository.git(
+      'worktree',
+      'add',
+      '--quiet',
+      '-b',
+      'feature/redirected-git-file',
+      linkedPath,
+    );
+    const session = await createRepositoryEngine().open(
+      asAbsolutePath(repository.path),
+    );
+    await writeFile(
+      join(linkedPath, '.git'),
+      `gitdir: ${join(unrelated.path, '.git')}\n`,
+    );
+
+    const redirected = findWorktree(
+      await snapshotRepository(session),
+      await realpath(linkedPath),
+    );
+
+    expect(redirected.availability).toMatchObject({
+      kind: 'unavailable',
+      prunable: false,
+    });
   });
 
   it('discovers every registered Worktree without path or Branch conventions', async () => {
@@ -376,6 +525,48 @@ describe('Repository Engine discovery', () => {
     expect(movedLinked.generation).not.toBe(recreatedLinked.generation);
   });
 
+  it('invalidates identity when a retained empty root gets a new registration', async () => {
+    const repository = await createRepositoryWithCommit();
+    const worktreeRoot = await mkdtemp(
+      join(tmpdir(), 'codex-git-registration-generation-'),
+    );
+    externalPaths.push(worktreeRoot);
+    const linkedPath = join(worktreeRoot, 'retained-root');
+    await repository.git(
+      'worktree',
+      'add',
+      '--quiet',
+      '-b',
+      'feature/registration-generation',
+      linkedPath,
+    );
+    const session = await createRepositoryEngine().open(
+      asAbsolutePath(repository.path),
+    );
+    const original = findWorktree(
+      await snapshotRepository(session),
+      await realpath(linkedPath),
+    );
+
+    await rm(join(linkedPath, '.git'));
+    await rm(join(linkedPath, 'README.md'));
+    await repository.git('worktree', 'prune', '--expire', 'now');
+    await repository.git(
+      'worktree',
+      'add',
+      '--quiet',
+      linkedPath,
+      'feature/registration-generation',
+    );
+    const recreated = findWorktree(
+      await snapshotRepository(session),
+      await realpath(linkedPath),
+    );
+
+    expect(recreated.worktreeId).not.toBe(original.worktreeId);
+    expect(recreated.generation).not.toBe(original.generation);
+  });
+
   it('does not revive an unavailable identity after prune and same-path recreation', async () => {
     const repository = await createRepositoryWithCommit();
     const worktreeRoot = await mkdtemp(
@@ -416,6 +607,41 @@ describe('Repository Engine discovery', () => {
 
     expect(recreatedMissing.worktreeId).not.toBe(missing.worktreeId);
     expect(recreatedMissing.generation).not.toBe(missing.generation);
+  });
+
+  it('uses a fresh generation when an unavailable registration cannot prove continuity', async () => {
+    const repository = await createRepositoryWithCommit();
+    const worktreeRoot = await mkdtemp(
+      join(tmpdir(), 'codex-git-unavailable-continuity-'),
+    );
+    externalPaths.push(worktreeRoot);
+    const linkedPath = join(worktreeRoot, 'missing');
+    await repository.git(
+      'worktree',
+      'add',
+      '--quiet',
+      '-b',
+      'feature/unavailable-continuity',
+      linkedPath,
+    );
+    const session = await createRepositoryEngine().open(
+      asAbsolutePath(repository.path),
+    );
+    await rm(linkedPath, { recursive: true });
+    const canonicalMissingPath = join(await realpath(worktreeRoot), 'missing');
+
+    const first = findWorktree(
+      await snapshotRepository(session),
+      canonicalMissingPath,
+    );
+    const second = findWorktree(
+      await snapshotRepository(session),
+      canonicalMissingPath,
+    );
+
+    expect(second.availability.kind).toBe('unavailable');
+    expect(second.worktreeId).not.toBe(first.worktreeId);
+    expect(second.generation).not.toBe(first.generation);
   });
 });
 
@@ -460,4 +686,16 @@ function findWorktree(repository: RepositoryDiscovery, canonicalPath: string) {
     throw new Error(`Expected Worktree ${JSON.stringify(canonicalPath)}.`);
   }
   return worktree;
+}
+
+async function waitForPath(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      await access(path);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error(`Timed out waiting for ${JSON.stringify(path)}.`);
 }

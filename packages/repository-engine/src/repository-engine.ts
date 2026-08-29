@@ -87,6 +87,11 @@ interface RepositoryIdentityState {
   generations: Map<string, WorktreeIdentityState>;
 }
 
+interface SessionState {
+  generation: number;
+  status: 'open' | 'closed' | 'invalid';
+}
+
 interface WorktreeIdentityState {
   readonly evidence: string;
   readonly generation: WorktreeGeneration;
@@ -113,16 +118,16 @@ export function createRepositoryEngine(): RepositoryEngine {
     async open(anchor) {
       const resolved = await resolveAnchor(anchor);
       const ids = createOpaqueIdAuthority();
-      let closed = false;
+      const state: SessionState = { generation: 0, status: 'open' };
 
       if (resolved === null) {
         return {
           async snapshot() {
-            assertOpen(closed);
+            beginSnapshot(state);
             return { kind: 'not_repository' };
           },
           async close() {
-            closed = true;
+            closeSession(state);
             ids.revokeAll();
           },
         };
@@ -136,14 +141,20 @@ export function createRepositoryEngine(): RepositoryEngine {
 
       return {
         async snapshot() {
-          assertOpen(closed);
-          return discoverRepository(resolved, identity, ids);
+          const sessionGeneration = beginSnapshot(state);
+          return discoverRepository(
+            resolved,
+            identity,
+            ids,
+            state,
+            sessionGeneration,
+          );
         },
         async close() {
-          if (closed) {
+          if (state.status !== 'open') {
             return;
           }
-          closed = true;
+          closeSession(state);
           identity.generations.clear();
           ids.revokeAll();
         },
@@ -156,7 +167,16 @@ async function discoverRepository(
   resolved: ResolvedAnchor,
   identity: RepositoryIdentityState,
   ids: OpaqueIdAuthority,
+  state: SessionState,
+  sessionGeneration: number,
 ): Promise<RepositoryOpenResult> {
+  await assertRepositoryContinuity(
+    resolved,
+    identity,
+    ids,
+    state,
+    sessionGeneration,
+  );
   const inventory = await runGit(
     [
       '--git-dir',
@@ -168,9 +188,20 @@ async function discoverRepository(
     ],
     true,
   );
+  assertSessionGeneration(state, sessionGeneration);
   const records = parseWorktreeListPorcelain(inventory);
   const registrations = await Promise.all(
-    records.map((record) => canonicalizeRegistration(record)),
+    records.map((record) =>
+      canonicalizeRegistration(record, resolved.commonGitDirectory),
+    ),
+  );
+  assertSessionGeneration(state, sessionGeneration);
+  await assertRepositoryContinuity(
+    resolved,
+    identity,
+    ids,
+    state,
+    sessionGeneration,
   );
   const nextGenerations = new Map<string, WorktreeIdentityState>();
   const seenPaths = new Set<string>();
@@ -184,6 +215,9 @@ async function discoverRepository(
     seenPaths.add(registration.pathKey);
 
     const previous = identity.generations.get(registration.pathKey);
+    // Porcelain exposes no registration/admin identity for a missing path. Without
+    // inspecting Git's private layout, continuity is unprovable, so stale opaque
+    // targets are safer to invalidate than to bind to a deterministic fingerprint.
     const retainsContinuousEvidence =
       registration.unavailableReason === null && !registration.record.prunable;
     const worktreeIdentity =
@@ -214,6 +248,28 @@ async function discoverRepository(
       worktrees,
     },
   };
+}
+
+async function assertRepositoryContinuity(
+  resolved: ResolvedAnchor,
+  identity: RepositoryIdentityState,
+  ids: OpaqueIdAuthority,
+  state: SessionState,
+  sessionGeneration: number,
+): Promise<void> {
+  const evidence = fileIdentity(await stat(resolved.commonGitDirectory));
+  assertSessionGeneration(state, sessionGeneration);
+  if (evidence === identity.evidence) {
+    return;
+  }
+
+  state.status = 'invalid';
+  state.generation += 1;
+  identity.generations.clear();
+  ids.revokeAll();
+  throw new Error(
+    'Repository Session is invalid because the Repository was replaced.',
+  );
 }
 
 async function resolveAnchor(
@@ -266,6 +322,7 @@ async function resolveAnchor(
 
 async function canonicalizeRegistration(
   record: WorktreePorcelainRecord,
+  commonGitDirectory: AbsolutePath,
 ): Promise<CanonicalRegistration> {
   let canonicalPathBytes: Uint8Array;
   let unavailableReason: string | null = null;
@@ -289,16 +346,56 @@ async function canonicalizeRegistration(
   const canonicalPath = decodeAbsolutePath(canonicalPathBytes);
   let evidence: string;
   if (unavailableReason === null) {
-    try {
-      evidence = `${pathKey}\0${fileIdentity(await stat(Buffer.from(canonicalPathBytes)))}`;
-    } catch (error) {
-      if (!isMissingPathError(error)) {
-        throw error;
-      }
+    if (canonicalPath === null) {
       unavailableReason =
-        record.prunableReason ??
-        'The registered Working Tree cannot be resolved as a Git Worktree.';
+        'The registered Working Tree path cannot be addressed safely by the Git process runner.';
       evidence = unavailableEvidence(record, pathKey);
+    } else {
+      try {
+        const workingTreeEvidence = fileIdentity(
+          await stat(Buffer.from(canonicalPathBytes)),
+        );
+        const gitDirectory = await realpath(
+          decodeLine(
+            await runGit(
+              [
+                '-C',
+                canonicalPath,
+                'rev-parse',
+                '--path-format=absolute',
+                '--git-dir',
+              ],
+              false,
+            ),
+          ),
+        );
+        const resolvedCommonGitDirectory = await realpath(
+          decodeLine(
+            await runGit(
+              [
+                '-C',
+                canonicalPath,
+                'rev-parse',
+                '--path-format=absolute',
+                '--git-common-dir',
+              ],
+              false,
+            ),
+          ),
+        );
+        if (resolvedCommonGitDirectory !== commonGitDirectory) {
+          throw new WorktreeRegistrationMismatchError();
+        }
+        evidence = `${pathKey}\0${workingTreeEvidence}\0${gitDirectory}\0${fileIdentity(await stat(gitDirectory))}`;
+      } catch (error) {
+        if (!isUnresolvableWorktreeError(error)) {
+          throw error;
+        }
+        unavailableReason =
+          record.prunableReason ??
+          'The registered Working Tree cannot be resolved as its Git registration.';
+        evidence = unavailableEvidence(record, pathKey);
+      }
     }
   } else {
     evidence = unavailableEvidence(record, pathKey);
@@ -462,9 +559,32 @@ function gitEnvironment(): NodeJS.ProcessEnv {
   return environment;
 }
 
-function assertOpen(closed: boolean): void {
-  if (closed) {
+function beginSnapshot(state: SessionState): number {
+  if (state.status === 'invalid') {
+    throw new Error(
+      'Repository Session is invalid because the Repository was replaced.',
+    );
+  }
+  if (state.status === 'closed') {
     throw new Error('Repository Session is closed.');
+  }
+  return state.generation;
+}
+
+function assertSessionGeneration(
+  state: SessionState,
+  generation: number,
+): void {
+  if (state.generation !== generation || state.status !== 'open') {
+    beginSnapshot(state);
+    throw new Error('Repository Session generation changed.');
+  }
+}
+
+function closeSession(state: SessionState): void {
+  if (state.status === 'open') {
+    state.status = 'closed';
+    state.generation += 1;
   }
 }
 
@@ -478,11 +598,21 @@ class GitCommandError extends Error {
   }
 }
 
+class WorktreeRegistrationMismatchError extends Error {}
+
 function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
   return (
     error instanceof Error &&
     'code' in error &&
     (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+  );
+}
+
+function isUnresolvableWorktreeError(error: unknown): boolean {
+  return (
+    isMissingPathError(error) ||
+    error instanceof WorktreeRegistrationMismatchError ||
+    (error instanceof GitCommandError && error.exitCode === 128)
   );
 }
 
