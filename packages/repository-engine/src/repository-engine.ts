@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { realpath, stat } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 
 import {
@@ -389,6 +389,9 @@ async function canonicalizeRegistration(
         if (resolvedCommonGitDirectory !== commonGitDirectory) {
           throw new WorktreeRegistrationMismatchError();
         }
+        if (gitDirectory !== commonGitDirectory) {
+          await assertWorktreeAdminBacklink(canonicalPathBytes, gitDirectory);
+        }
         const gitDirectoryEvidence = fileIdentity(await stat(gitDirectory));
         adminIdentity = `${gitDirectory}\0${gitDirectoryEvidence}`;
         evidence = `${pathKey}\0${workingTreeEvidence}\0${adminIdentity}`;
@@ -415,6 +418,49 @@ async function canonicalizeRegistration(
     record,
     unavailableReason,
   };
+}
+
+async function assertWorktreeAdminBacklink(
+  canonicalPathBytes: Uint8Array,
+  gitDirectory: string,
+): Promise<void> {
+  const adminControlPath = decodeLine(
+    await runGit(
+      [
+        '--git-dir',
+        gitDirectory,
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-path',
+        'gitdir',
+      ],
+      false,
+    ),
+  );
+  const backlinkTarget = stripLineEnding(await readFile(adminControlPath));
+  const candidateControlPath = Buffer.concat([
+    Buffer.from(canonicalPathBytes),
+    Buffer.from('/.git'),
+  ]);
+  const [canonicalBacklinkTarget, canonicalCandidateControlPath] =
+    await Promise.all([
+      realpath(backlinkTarget, { encoding: 'buffer' }),
+      realpath(candidateControlPath, { encoding: 'buffer' }),
+    ]);
+  if (!canonicalBacklinkTarget.equals(canonicalCandidateControlPath)) {
+    throw new WorktreeRegistrationMismatchError();
+  }
+}
+
+function stripLineEnding(value: Buffer): Buffer {
+  let end = value.length;
+  if (value[end - 1] === 0x0a) {
+    end -= 1;
+  }
+  if (value[end - 1] === 0x0d) {
+    end -= 1;
+  }
+  return value.subarray(0, end);
 }
 
 function rejectDuplicateAdminIdentities(

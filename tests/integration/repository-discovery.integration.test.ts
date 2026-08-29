@@ -396,10 +396,55 @@ describe('Repository Engine discovery', () => {
     expect(first.availability).toEqual({
       kind: 'unavailable',
       reason:
-        'The registered Working Tree resolves to a Git admin directory shared by another registration.',
+        'The registered Working Tree cannot be resolved as its Git registration.',
       prunable: false,
     });
-    expect(second.availability.kind).toBe('unavailable');
+    expect(second.availability.kind).toBe('available');
+  });
+
+  it('rejects a registration redirected to a prunable sibling admin directory', async () => {
+    const repository = await createRepositoryWithCommit();
+    const worktreeRoot = await mkdtemp(
+      join(tmpdir(), 'codex-git-prunable-admin-'),
+    );
+    externalPaths.push(worktreeRoot);
+    const firstPath = join(worktreeRoot, 'first');
+    const secondPath = join(worktreeRoot, 'second');
+    await repository.git(
+      'worktree',
+      'add',
+      '--quiet',
+      '-b',
+      'feature/prunable-first',
+      firstPath,
+    );
+    await repository.git(
+      'worktree',
+      'add',
+      '--quiet',
+      '-b',
+      'feature/prunable-second',
+      secondPath,
+    );
+    const secondControlFile = await readFile(join(secondPath, '.git'));
+    await rm(secondPath, { recursive: true });
+    await writeFile(join(firstPath, '.git'), secondControlFile);
+
+    const result = await openRepository(
+      createRepositoryEngine(),
+      repository.path,
+    );
+    const first = findWorktree(result, await realpath(firstPath));
+    const missingSecond = findWorktree(
+      result,
+      join(await realpath(worktreeRoot), 'second'),
+    );
+
+    expect(first.availability.kind).toBe('unavailable');
+    expect(missingSecond.availability).toMatchObject({
+      kind: 'unavailable',
+      prunable: true,
+    });
   });
 
   it('discovers every registered Worktree without path or Branch conventions', async () => {
