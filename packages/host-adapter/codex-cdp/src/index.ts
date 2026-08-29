@@ -1,3 +1,8 @@
-import type { HostAdapter } from '@codex-git/host-adapter';
-
-export type CodexCdpHostAdapterContract = HostAdapter;
+export { CodexCdpHostAdapter } from './adapter.js';
+export { acquireDedicatedRendererCspBypass } from './csp-bypass.js';
+export type { CodexCdpCommandTransport } from './csp-bypass.js';
+export type {
+  CodexRenderer,
+  CodexRendererSource,
+  CspBypassLease,
+} from './renderer.js';
