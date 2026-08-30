@@ -1,4 +1,10 @@
-import type { RepositorySnapshot } from '@codex-git/protocol';
+import type {
+  DiffResult,
+  FileId,
+  NativeActionRequest,
+  NativeActionResult,
+  RepositorySnapshot,
+} from '@codex-git/protocol';
 
 type ProtocolWorktree = RepositorySnapshot['worktrees'][number];
 type ProtocolOperation = RepositorySnapshot['operations'][number];
@@ -46,6 +52,7 @@ export interface WorktreeOverviewSnapshot {
   readonly freshness: ProtocolWorktree['freshness'];
   readonly head: ProtocolWorktree['head'];
   readonly status: ProtocolWorktree['status'];
+  readonly changes: ProtocolWorktree['changes'];
   readonly upstream: UpstreamOverview;
   readonly transition?: {
     readonly label: string;
@@ -90,4 +97,8 @@ export interface RepositoryOverviewSource {
   subscribe(listener: () => void): () => void;
   requestRefresh(): void;
   requestFetch(remoteId: ProtocolRemote['remoteId'] | null): void;
+  requestDiff(fileId: FileId): Promise<DiffResult>;
+  requestNativeAction(
+    request: NativeActionRequest,
+  ): Promise<NativeActionResult>;
 }

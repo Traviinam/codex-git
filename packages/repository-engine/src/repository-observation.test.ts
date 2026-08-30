@@ -117,7 +117,6 @@ describe('Repository observation Git recipes', () => {
           '--porcelain=v2',
           '-z',
           '--branch',
-          '--no-renames',
           '--untracked-files=all',
         ],
         true,

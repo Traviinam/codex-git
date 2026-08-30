@@ -5,6 +5,51 @@ import { PROTOCOL_VERSION, PROTOCOL_VERSION_HEADER } from '@codex-git/protocol';
 import { createProtocolRepositorySource } from './protocol-repository-source.js';
 
 describe('ProtocolRepositorySource', () => {
+  it('requests exactly one validated Diff by opaque File ID', async () => {
+    const requests: Array<{
+      readonly url: string;
+      readonly init?: RequestInit;
+    }> = [];
+    const sessionUrl =
+      'http://127.0.0.1:4173/instance/fixture-token/v1/session';
+    const fileId = 'file_0123456789abcdef0123456789abcdef';
+    const source = createProtocolRepositorySource({
+      projectPath: '/projects/codex-git',
+      sessionUrl,
+      createEventSource: () => new FakeEventSource(),
+      fetch: async (input, init) => {
+        const url = String(input);
+        requests.push({ url, init });
+        if (url.endsWith('/session')) return jsonResponse(sessionMetadata);
+        if (url.endsWith('/snapshot')) return jsonResponse(repositorySnapshot);
+        return jsonResponse({
+          kind: 'text',
+          fileId,
+          baseline: 'head_to_index',
+          content: '+reviewed\n',
+          lineCount: 1,
+        });
+      },
+    });
+    await until(() => source.getSnapshot().kind === 'repository');
+
+    await expect(source.requestDiff(fileId as never)).resolves.toMatchObject({
+      kind: 'text',
+      fileId,
+    });
+
+    const diff = requests.at(-1)!;
+    expect(diff.url).toBe(sessionUrl.replace(/\/session$/u, '/diff'));
+    expect(diff.init?.method).toBe('POST');
+    expect(diff.init?.body).toBe(JSON.stringify({ fileId }));
+    expect(new Headers(diff.init?.headers)).toMatchObject(
+      expect.objectContaining({}),
+    );
+    expect(new Headers(diff.init?.headers).get(PROTOCOL_VERSION_HEADER)).toBe(
+      String(PROTOCOL_VERSION),
+    );
+  });
+
   it('negotiates the protocol and publishes the authoritative snapshot', async () => {
     const requests: Array<{
       readonly url: string;

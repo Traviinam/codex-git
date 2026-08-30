@@ -24,6 +24,94 @@ describe('Repository overview interactions', () => {
     container.remove();
   });
 
+  it('reviews Changed Files by group and navigates the current Worktree', async () => {
+    const fixture = createOverviewFixture('changed-worktree');
+    const store = createRepositoryStore(fixture.source);
+    act(() => root.render(<App store={store} />));
+
+    expect(container.textContent).toContain('Staged Changes');
+    expect(container.textContent).toContain('Changes');
+    expect(container.textContent).toContain('Untracked Files');
+    const staged = button('Review staged README.md');
+    await act(async () => staged.click());
+
+    expect(fixture.requests.diff).toEqual([
+      'file_00000000000000000000000000000001',
+    ]);
+    expect(container.textContent).toContain('Side-by-side');
+    expect(container.textContent).toContain('new staged line');
+
+    expect(button('Next Changed File').disabled).toBe(true);
+    await act(async () => button('Review changed src/app.ts').click());
+    await act(async () => button('Next Changed File').click());
+    expect(fixture.requests.diff).toEqual([
+      'file_00000000000000000000000000000001',
+      'file_00000000000000000000000000000002',
+      'file_00000000000000000000000000000003',
+    ]);
+    expect(container.textContent).toContain('src/utils.ts');
+
+    act(() => button('Show unified diff').click());
+    expect(container.textContent).toContain('Unified');
+  });
+
+  it('shows truthful metadata when Diff content cannot be rendered', async () => {
+    const fixture = createOverviewFixture('changed-worktree');
+    const store = createRepositoryStore({
+      ...fixture.source,
+      async requestDiff(fileId) {
+        return {
+          kind: 'binary',
+          fileId,
+          baseline: 'head_to_index',
+          byteCount: 4096,
+        };
+      },
+      async requestNativeAction(request) {
+        return request.kind === 'copy_relative_path'
+          ? { kind: 'copy_text', text: 'README.md' }
+          : { kind: 'performed' };
+      },
+    });
+    act(() => root.render(<App store={store} />));
+
+    await act(async () => button('Review staged README.md').click());
+
+    expect(container.textContent).toContain('Binary file · 4,096 bytes');
+    expect(container.querySelector('pre')).toBeNull();
+    expect(button('Open in Default App')).toBeDefined();
+    await act(async () => button('Copy Relative Path').click());
+    expect(container.textContent).toContain('Relative path: README.md');
+  });
+
+  it('shows Conflict index stages in the default side-by-side review', async () => {
+    const fixture = createOverviewFixture('changed-worktree');
+    const store = createRepositoryStore({
+      ...fixture.source,
+      async requestDiff(fileId) {
+        return {
+          kind: 'text',
+          fileId,
+          baseline: 'conflict',
+          content:
+            'Conflict index stages: base=present; ours=present; theirs=present.\n@@ -0,0 +1 @@\n+<<<<<<< HEAD\n',
+          lineCount: 3,
+        };
+      },
+    });
+    act(() => root.render(<App store={store} />));
+
+    await act(async () => button('Review staged README.md').click());
+
+    expect(
+      container.querySelector('[aria-label="Conflict Index Stages"]')
+        ?.textContent,
+    ).toBe(
+      'Conflict index stages: base=present; ours=present; theirs=present.',
+    );
+    expect(container.textContent).toContain('<<<<<<< HEAD');
+  });
+
   it('moves through the stable Worktree navigator with arrow keys', () => {
     const fixture = createOverviewFixture('many-worktrees');
     const store = createRepositoryStore(fixture.source);

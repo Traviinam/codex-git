@@ -1,4 +1,20 @@
-import type { FileId, WorktreeId } from '@codex-git/protocol';
+import type {
+  DiffResult,
+  FileId,
+  NativeActionRequest,
+  NativeActionResult,
+  WorktreeId,
+} from '@codex-git/protocol';
+
+export type DiffLoadState =
+  | { readonly kind: 'idle' }
+  | { readonly kind: 'loading'; readonly fileId: FileId }
+  | { readonly kind: 'loaded'; readonly result: DiffResult }
+  | {
+      readonly kind: 'failed';
+      readonly fileId: FileId;
+      readonly message: string;
+    };
 
 import type {
   RepositoryOverviewSnapshot,
@@ -13,6 +29,7 @@ export interface RepositoryStoreSnapshot {
   readonly searchQuery: string;
   readonly commitDrafts: Readonly<Record<string, string>>;
   readonly selectedFileId: FileId | null;
+  readonly diff: DiffLoadState;
   readonly selectionNotice: string | null;
   readonly focusRecoveryRevision: number;
 }
@@ -30,6 +47,9 @@ export interface RepositoryStore {
   requestFetch(
     remoteId: RepositoryOverviewSnapshot['remotes'][number]['remoteId'] | null,
   ): void;
+  requestNativeAction(
+    request: NativeActionRequest,
+  ): Promise<NativeActionResult>;
 }
 
 export function createRepositoryStore(
@@ -44,6 +64,8 @@ export function createRepositoryStore(
   let searchQuery = '';
   let commitDrafts: Readonly<Record<string, string>> = {};
   let selectedFileId: FileId | null = null;
+  let diff: DiffLoadState = { kind: 'idle' };
+  let diffRequestGeneration = 0;
   let selectionNotice: string | null = null;
   let focusRecoveryRevision = 0;
   let storeSnapshot = buildSnapshot();
@@ -66,6 +88,7 @@ export function createRepositoryStore(
       selectedGeneration = replacement?.generation ?? null;
       selectedHeadKey = headSelectionKey(replacement);
       selectedFileId = null;
+      clearDiff();
       selectionNotice =
         previousSelection === null
           ? null
@@ -76,8 +99,17 @@ export function createRepositoryStore(
     } else if (branchChanged) {
       selectedHeadKey = headSelectionKey(selected);
       selectedFileId = null;
+      clearDiff();
       selectionNotice =
         'Branch or HEAD changed; the previous file selection was cleared.';
+    } else if (
+      selectedFileId !== null &&
+      !selected.changes.some(({ fileId }) => fileId === selectedFileId)
+    ) {
+      selectedFileId = null;
+      clearDiff();
+      selectionNotice =
+        'Changed Files were refreshed; the previous file selection was cleared.';
     } else {
       selectionNotice = null;
     }
@@ -107,6 +139,7 @@ export function createRepositoryStore(
       selectedGeneration = worktree.generation;
       selectedHeadKey = headSelectionKey(worktree);
       selectedFileId = null;
+      clearDiff();
       selectionNotice = null;
       emit();
     },
@@ -126,7 +159,43 @@ export function createRepositoryStore(
       if (disposed) return;
       if (selectedFileId === fileId) return;
       selectedFileId = fileId;
+      diffRequestGeneration += 1;
+      const ownGeneration = diffRequestGeneration;
+      if (fileId === null) {
+        diff = { kind: 'idle' };
+        emit();
+        return;
+      }
+      diff = { kind: 'loading', fileId };
       emit();
+      void source
+        .requestDiff(fileId)
+        .then((result) => {
+          if (
+            disposed ||
+            ownGeneration !== diffRequestGeneration ||
+            selectedFileId !== fileId
+          ) {
+            return;
+          }
+          diff = { kind: 'loaded', result };
+          emit();
+        })
+        .catch(() => {
+          if (
+            disposed ||
+            ownGeneration !== diffRequestGeneration ||
+            selectedFileId !== fileId
+          ) {
+            return;
+          }
+          diff = {
+            kind: 'failed',
+            fileId,
+            message: 'The Diff could not be loaded. Refresh and try again.',
+          };
+          emit();
+        });
     },
     requestRefresh: () => {
       if (!disposed) source.requestRefresh();
@@ -134,6 +203,13 @@ export function createRepositoryStore(
     requestFetch: (remoteId) => {
       if (!disposed) source.requestFetch(remoteId);
     },
+    requestNativeAction: (request) =>
+      disposed
+        ? Promise.resolve({
+            kind: 'unavailable',
+            message: 'The Repository view is no longer active.',
+          })
+        : source.requestNativeAction(request),
   };
 
   function buildSnapshot(): RepositoryStoreSnapshot {
@@ -143,6 +219,7 @@ export function createRepositoryStore(
       searchQuery,
       commitDrafts,
       selectedFileId,
+      diff,
       selectionNotice,
       focusRecoveryRevision,
     };
@@ -151,6 +228,11 @@ export function createRepositoryStore(
   function emit() {
     storeSnapshot = buildSnapshot();
     listeners.forEach((listener) => listener());
+  }
+
+  function clearDiff() {
+    diffRequestGeneration += 1;
+    diff = { kind: 'idle' };
   }
 }
 

@@ -85,8 +85,47 @@ function worktree(source: PublishedWorktreeSnapshot) {
     indexTree: null,
     status: worktreeStatus(source),
     upstream: upstream(source),
-    changes: [],
+    changes: source.changes.map(
+      ({
+        fileId,
+        kind,
+        baseline,
+        displayPath,
+        previousDisplayPath,
+        nativeTargetId,
+      }) => ({
+        fileId,
+        kind,
+        baseline,
+        displayPath,
+        previousDisplayPath,
+        nativeTargets: [nativeFileTarget(source, nativeTargetId, fileId)],
+      }),
+    ),
     nativeTargets: [],
+  };
+}
+
+function nativeFileTarget(
+  worktree: PublishedWorktreeSnapshot,
+  targetId: PublishedWorktreeSnapshot['changes'][number]['nativeTargetId'],
+  fileId: PublishedWorktreeSnapshot['changes'][number]['fileId'],
+) {
+  const change = worktree.changes.find(
+    (candidate) => candidate.fileId === fileId,
+  )!;
+  let pathIsUtf8 = true;
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(change.pathBytes);
+  } catch {
+    pathIsUtf8 = false;
+  }
+  return {
+    targetId,
+    actions:
+      change.workingFilePresent && pathIsUtf8
+        ? (['open_default_app', 'copy_relative_path'] as const)
+        : (['copy_relative_path'] as const),
   };
 }
 

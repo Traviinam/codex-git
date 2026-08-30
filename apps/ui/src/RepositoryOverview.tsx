@@ -5,6 +5,8 @@ import type {
   WorktreeOverviewSnapshot,
 } from './repository-overview-model.js';
 import type { RepositoryStore } from './repository-store.js';
+import { ChangeGroups } from './ChangeGroups.js';
+import { DiffReview } from './DiffReview.js';
 
 export function RepositoryOverview({
   store,
@@ -347,11 +349,21 @@ export function RepositoryOverview({
             </label>
             <section>
               <h3>Change Groups</h3>
-              <p>Change review is not available yet.</p>
+              <ChangeGroups
+                worktree={selected}
+                selectedFileId={state.selectedFileId}
+                onSelect={(fileId) => store.selectFile(fileId)}
+              />
             </section>
             <section>
               <h3>Diff</h3>
-              <p>Select a Changed File when review is available.</p>
+              <DiffReview
+                worktree={selected}
+                selectedFileId={state.selectedFileId}
+                diff={state.diff}
+                onSelect={(fileId) => store.selectFile(fileId)}
+                onNativeAction={(request) => store.requestNativeAction(request)}
+              />
             </section>
           </section>
         )}

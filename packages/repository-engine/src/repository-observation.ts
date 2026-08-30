@@ -18,6 +18,7 @@ import {
   type RemoteIdentityState,
   type RemoteSnapshot,
 } from './remote-observation.js';
+import { decodeForDisplay } from './worktree-porcelain.js';
 
 const DEFAULT_GIT_READ_CONCURRENCY = 4;
 const MAX_COHERENCE_ATTEMPTS = 3;
@@ -47,6 +48,25 @@ export interface WorktreeStatusSummary {
   readonly staged: number;
   readonly unstaged: number;
   readonly untracked: number;
+}
+
+export type ChangedFileObservation =
+  | ChangedFileObservationBase<'conflict', 'conflict'>
+  | ChangedFileObservationBase<'staged_change', 'head_to_index'>
+  | ChangedFileObservationBase<'change', 'index_to_working_tree'>
+  | ChangedFileObservationBase<'untracked', 'empty_to_working_tree'>;
+
+interface ChangedFileObservationBase<
+  Kind extends string,
+  Baseline extends string,
+> {
+  readonly kind: Kind;
+  readonly baseline: Baseline;
+  readonly displayPath: string;
+  readonly pathBytes: Uint8Array;
+  readonly previousDisplayPath: string | null;
+  readonly previousPathBytes: Uint8Array | null;
+  readonly workingFilePresent: boolean;
 }
 
 export type UpstreamSnapshot =
@@ -86,6 +106,7 @@ export type WorktreeObservation =
       readonly head: DiscoveredHead;
       readonly index: IndexSnapshot;
       readonly status: WorktreeStatusSummary;
+      readonly changes: readonly ChangedFileObservation[];
       readonly upstream: UpstreamSnapshot;
     }
   | {
@@ -109,6 +130,7 @@ export type GitReader = (
   allowLargeOutput: boolean,
   acceptedEmptyExitCode?: 1,
   signal?: AbortSignal,
+  maximumOutputBytes?: number,
 ) => Promise<Uint8Array>;
 
 export interface RepositoryObserver {
@@ -311,6 +333,7 @@ async function observeWorktree(
         locked: await pathExists(`${indexPath}.lock`),
       },
       status: observed.status,
+      changes: observed.changes,
       upstream: resolveUpstream(observed.upstream, shared),
     };
   } catch (error) {
@@ -352,7 +375,6 @@ async function readCoherentWorktree(
         '--porcelain=v2',
         '-z',
         '--branch',
-        '--no-renames',
         '--untracked-files=all',
       ],
       true,
@@ -421,6 +443,7 @@ function summarizeStatus(
 ): {
   readonly head: DiscoveredHead;
   readonly status: WorktreeStatusSummary;
+  readonly changes: readonly ChangedFileObservation[];
   readonly upstream: ObservedUpstream;
 } {
   let branchHead: string | undefined;
@@ -486,6 +509,7 @@ function summarizeStatus(
       unstaged,
       untracked,
     },
+    changes: parseChangedFiles(output),
     upstream:
       branchHead === '(detached)'
         ? { kind: 'detached' }
@@ -497,6 +521,106 @@ function summarizeStatus(
               aheadBehind: branchAheadBehind,
             },
   };
+}
+
+function parseChangedFiles(
+  output: Uint8Array,
+): readonly ChangedFileObservation[] {
+  const groups: ChangedFileObservation[][] = [[], [], [], []];
+  const fields = splitNul(output);
+  for (let index = 0; index < fields.length; index += 1) {
+    const field = fields[index]!;
+    const recordKind = String.fromCharCode(field[0] ?? 0);
+    if (recordKind === '?') {
+      groups[3]!.push(
+        changedFile(
+          'untracked',
+          'empty_to_working_tree',
+          field.subarray(2),
+          null,
+          true,
+        ),
+      );
+      continue;
+    }
+    if (recordKind === 'u') {
+      groups[0]!.push(
+        changedFile(
+          'conflict',
+          'conflict',
+          pathAfterFields(field, 10),
+          null,
+          true,
+        ),
+      );
+      continue;
+    }
+    if (recordKind !== '1' && recordKind !== '2') continue;
+    const path = pathAfterFields(field, recordKind === '1' ? 8 : 9);
+    const previousPath =
+      recordKind === '2' ? (fields[(index += 1)] ?? null) : null;
+    const indexStatus = String.fromCharCode(field[2] ?? 0x2e);
+    const worktreeStatus = String.fromCharCode(field[3] ?? 0x2e);
+    if (indexStatus !== '.') {
+      groups[1]!.push(
+        changedFile(
+          'staged_change',
+          'head_to_index',
+          path,
+          isRenameOrCopy(indexStatus) ? previousPath : null,
+          indexStatus !== 'D' || worktreeStatus !== '.',
+        ),
+      );
+    }
+    if (worktreeStatus !== '.') {
+      groups[2]!.push(
+        changedFile(
+          'change',
+          'index_to_working_tree',
+          path,
+          isRenameOrCopy(worktreeStatus) ? previousPath : null,
+          worktreeStatus !== 'D',
+        ),
+      );
+    }
+  }
+  return groups.flat();
+}
+
+function isRenameOrCopy(status: string): boolean {
+  return status === 'R' || status === 'C';
+}
+
+function changedFile<Kind extends ChangedFileObservation['kind']>(
+  kind: Kind,
+  baseline: Extract<ChangedFileObservation, { kind: Kind }>['baseline'],
+  pathBytes: Uint8Array,
+  previousPathBytes: Uint8Array | null = null,
+  workingFilePresent = true,
+): Extract<ChangedFileObservation, { kind: Kind }> {
+  return {
+    kind,
+    baseline,
+    displayPath: decodeForDisplay(pathBytes),
+    pathBytes: pathBytes.slice(),
+    previousDisplayPath:
+      previousPathBytes === null ? null : decodeForDisplay(previousPathBytes),
+    previousPathBytes: previousPathBytes?.slice() ?? null,
+    workingFilePresent,
+  } as Extract<ChangedFileObservation, { kind: Kind }>;
+}
+
+function pathAfterFields(
+  record: Uint8Array,
+  separatorCount: number,
+): Uint8Array {
+  let seen = 0;
+  for (let index = 0; index < record.length; index += 1) {
+    if (record[index] !== 0x20) continue;
+    seen += 1;
+    if (seen === separatorCount) return record.subarray(index + 1);
+  }
+  throw new Error('Git status returned a malformed Changed File record.');
 }
 
 type ObservedUpstream =
