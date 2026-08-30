@@ -620,6 +620,7 @@ function decodeLine(output: Uint8Array): string {
 function runGit(
   args: readonly string[],
   allowLargeOutput: boolean,
+  acceptedEmptyExitCode?: 1,
 ): Promise<Uint8Array> {
   return new Promise((resolvePromise, reject) => {
     execFile(
@@ -633,6 +634,10 @@ function runGit(
         windowsHide: true,
       },
       (error, stdout) => {
+        if (error !== null && error.code === acceptedEmptyExitCode) {
+          resolvePromise(stdout);
+          return;
+        }
         if (error !== null) {
           reject(
             new GitCommandError(

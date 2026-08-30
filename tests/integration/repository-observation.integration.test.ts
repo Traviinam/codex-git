@@ -149,6 +149,27 @@ describe('Repository observation', () => {
     await session.close();
   });
 
+  it('keeps a Remote with only excluded custom configuration observable', async () => {
+    const repository = await createRepositoryWithCommit();
+    await repository.git(
+      'config',
+      'remote.custom.customSecret',
+      'do-not-collect',
+    );
+    const session = await createRepositoryEngine().open(
+      repository.path as AbsolutePath,
+    );
+    const snapshot = await snapshotRepository(session);
+    expect(snapshot.remotes).toEqual([
+      {
+        remoteId: expect.stringMatching(/^remote_[0-9a-f]{32}$/u),
+        displayName: 'custom',
+        host: 'local',
+      },
+    ]);
+    await session.close();
+  });
+
   it('advances only shared refs axes for external Local and Remote-tracking ref changes', async () => {
     const repository = await createRepositoryWithCommit();
     const session = await createRepositoryEngine().open(

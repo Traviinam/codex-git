@@ -76,6 +76,7 @@ export interface RepositoryObservation {
 export type GitReader = (
   args: readonly string[],
   allowLargeOutput: boolean,
+  acceptedEmptyExitCode?: 1,
 ) => Promise<Uint8Array>;
 
 export interface RepositoryObserver {
@@ -148,8 +149,8 @@ async function observeShared(
     ),
     observeRemotes(
       contextArgs,
-      (args, allowLargeOutput) =>
-        runRead(reads, readGit, args, allowLargeOutput),
+      (args, allowLargeOutput, acceptedEmptyExitCode) =>
+        runRead(reads, readGit, args, allowLargeOutput, acceptedEmptyExitCode),
       remoteIdentity,
       ids,
     ),
@@ -285,9 +286,11 @@ function runRead(
   readGit: GitReader,
   args: readonly string[],
   allowLargeOutput: boolean,
+  acceptedEmptyExitCode?: 1,
 ): Promise<Uint8Array> {
-  return policy.run(JSON.stringify([allowLargeOutput, args]), async () =>
-    readGit(args, allowLargeOutput),
+  return policy.run(
+    JSON.stringify([allowLargeOutput, acceptedEmptyExitCode, args]),
+    async () => readGit(args, allowLargeOutput, acceptedEmptyExitCode),
   );
 }
 

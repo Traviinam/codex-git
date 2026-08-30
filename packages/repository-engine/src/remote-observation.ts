@@ -21,6 +21,7 @@ export interface RemoteObservation {
 export type RemoteGitReader = (
   args: readonly string[],
   allowLargeOutput: boolean,
+  acceptedEmptyExitCode?: 1,
 ) => Promise<Uint8Array>;
 
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
@@ -65,6 +66,7 @@ export async function observeRemotes(
               remoteConfigPattern,
             ],
             true,
+            1,
           ),
         );
   const resolved = await Promise.all(

@@ -18,9 +18,14 @@ describe('Repository observation Git recipes', () => {
     const calls: Array<{
       args: readonly string[];
       allowLargeOutput: boolean;
+      acceptedEmptyExitCode?: 1;
     }> = [];
-    const read: GitReader = async (args, allowLargeOutput) => {
-      calls.push({ args, allowLargeOutput });
+    const read: GitReader = async (
+      args,
+      allowLargeOutput,
+      acceptedEmptyExitCode,
+    ) => {
+      calls.push({ args, allowLargeOutput, acceptedEmptyExitCode });
       if (args.includes('for-each-ref')) {
         return Buffer.from(`refs/heads/main\0${objectId}\0\n`);
       }
@@ -86,6 +91,7 @@ describe('Repository observation Git recipes', () => {
           '^remote\\..+\\.(url|pushurl|fetch|push|mirror|prune|prunetags|tagopt|skipdefaultupdate|skipfetchall)$',
         ],
         true,
+        1,
       ),
       recipe(['-C', path, 'ls-remote', '--get-url', '--', 'origin'], true),
       recipe(
@@ -203,8 +209,12 @@ function observer(read: GitReader) {
   return createRepositoryObserver(read, ids, createRemoteIdentityState());
 }
 
-function recipe(args: readonly string[], allowLargeOutput: boolean) {
-  return { args, allowLargeOutput };
+function recipe(
+  args: readonly string[],
+  allowLargeOutput: boolean,
+  acceptedEmptyExitCode?: 1,
+) {
+  return { args, allowLargeOutput, acceptedEmptyExitCode };
 }
 
 function fixtureWorktree(path: string, id: string): DiscoveredWorktree {
