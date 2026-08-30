@@ -25,8 +25,6 @@ import {
 const runtimes: StandaloneRuntime[] = [];
 const repositories: TemporaryGitRepository[] = [];
 const temporaryDirectories: string[] = [];
-// Vite and loopback shutdown can exceed Vitest's default under shared CI load.
-const runtimeCleanupTimeoutMilliseconds = 30_000;
 
 afterEach(async () => {
   await Promise.all(runtimes.splice(0).map((runtime) => runtime.close()));
@@ -38,7 +36,7 @@ afterEach(async () => {
       .splice(0)
       .map((directory) => rm(directory, { recursive: true, force: true })),
   );
-}, runtimeCleanupTimeoutMilliseconds);
+});
 
 describe('protocol runtime composition', () => {
   it('negotiates the shared protocol from the standalone surface Origin', async () => {

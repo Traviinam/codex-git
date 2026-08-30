@@ -50,7 +50,7 @@ export async function startStandaloneRuntime(
     await Promise.all([
       hostConnection?.close(),
       repositorySession?.close(),
-      surfaceServer?.close(),
+      closeSurfaceServer(surfaceServer),
       protocolServer?.close(),
     ]);
     await invalidationPump;
@@ -132,6 +132,14 @@ export async function startStandaloneRuntime(
     await closeResources();
     throw error;
   }
+}
+
+async function closeSurfaceServer(
+  server: ViteDevServer | undefined,
+): Promise<void> {
+  if (server === undefined) return;
+  await server.environments.client?.waitForRequestsIdle();
+  await server.close();
 }
 
 async function dispatchRepositoryCommand(
