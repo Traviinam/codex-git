@@ -131,6 +131,9 @@ describe('protocol runtime composition', () => {
     });
     const body = await response.json();
     const canonicalPath = await realpath(repository.path);
+    const branchName = (
+      await repository.git('branch', '--show-current')
+    ).stdout.trim();
 
     expect(response.status).toBe(200);
     expect(repositorySnapshotSchema.safeParse(body).success).toBe(true);
@@ -147,7 +150,7 @@ describe('protocol runtime composition', () => {
           path: canonicalPath,
           availability: { kind: 'available' },
           freshness: { kind: 'current' },
-          head: { kind: 'local_branch', displayName: 'main' },
+          head: { kind: 'local_branch', displayName: branchName },
           status: { kind: 'clean' },
           upstream: { kind: 'unpublished' },
         },
