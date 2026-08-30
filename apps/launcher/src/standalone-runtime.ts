@@ -12,6 +12,7 @@ import { StandaloneHostAdapter } from '@codex-git/host-adapter-standalone';
 import { createServer as createViteServer, type ViteDevServer } from 'vite';
 
 import { protocolBootstrapPlugin } from './protocol-bootstrap.js';
+import { toProtocolRepositorySnapshot } from './repository-protocol-adapter.js';
 
 const loopbackHost = '127.0.0.1';
 const uiConfigPath = fileURLToPath(
@@ -37,6 +38,7 @@ export async function startStandaloneRuntime(
   let surfaceServer: ViteDevServer | undefined;
   let hostConnection: HostConnection | null = null;
   let repositorySession: RepositorySession | undefined;
+  let openedRepositoryId: RepositoryId | undefined;
   let invalidationPump = Promise.resolve();
 
   async function closeResources(): Promise<void> {
@@ -50,23 +52,40 @@ export async function startStandaloneRuntime(
   }
 
   try {
-    protocolServer = await startLoopbackServer({ allowedOrigins: ['null'] });
     if (options.projectPath !== undefined) {
       repositorySession = await createRepositoryEngine().open(
         options.projectPath as AbsolutePath,
       );
       const opened = await repositorySession.requestRefresh();
       if (opened.kind === 'repository') {
-        invalidationPump = forwardRepositoryInvalidations(
-          repositorySession,
-          protocolServer,
-          opened.repository.repositoryId,
-        );
+        openedRepositoryId = opened.repository.repositoryId;
       }
+    }
+    protocolServer = await startLoopbackServer({
+      allowedOrigins: ['null'],
+      handlers:
+        repositorySession === undefined || options.projectPath === undefined
+          ? undefined
+          : {
+              snapshot: async () =>
+                toProtocolRepositorySnapshot(
+                  await repositorySession!.requestRefresh(),
+                  options.projectPath!,
+                ),
+            },
+    });
+    if (repositorySession !== undefined && openedRepositoryId !== undefined) {
+      invalidationPump = forwardRepositoryInvalidations(
+        repositorySession,
+        protocolServer,
+        openedRepositoryId,
+      );
     }
     surfaceServer = await createViteServer({
       configFile: uiConfigPath,
-      plugins: [protocolBootstrapPlugin(protocolServer.sessionUrl)],
+      plugins: [
+        protocolBootstrapPlugin(protocolServer.sessionUrl, options.projectPath),
+      ],
       server: {
         host: loopbackHost,
         port: options.surfacePort ?? 5173,

@@ -94,20 +94,33 @@ describe('protocol runtime schemas', () => {
 
   it('accepts a coherent repository snapshot made only of opaque authority', () => {
     const result = repositorySnapshotSchema.safeParse({
+      kind: 'repository',
       repositoryId: 'repository_0123456789abcdef0123456789abcdef',
       repositoryRevision: 4,
       topologyRevision: 2,
       refsRevision: 3,
+      displayName: 'repository',
+      path: '/workspace/repository',
       refresh: { kind: 'current' },
+      fetch: { kind: 'never' },
+      fetchAvailable: true,
       worktrees: [
         {
           worktreeId: 'worktree_0123456789abcdef0123456789abcdef',
           worktreeRevision: 7,
           generation: 'generation_0123456789abcdef0123456789abcdef',
+          role: 'main',
+          displayName: 'repository',
+          path: '/workspace/repository',
+          availability: { kind: 'available' },
           freshness: { kind: 'current' },
           head: { kind: 'initial' },
           indexTree: null,
           status: { kind: 'clean' },
+          upstream: {
+            kind: 'not-applicable',
+            reason: 'The branch has no configured Upstream.',
+          },
           changes: [
             {
               fileId: 'file_0123456789abcdef0123456789abcdef',

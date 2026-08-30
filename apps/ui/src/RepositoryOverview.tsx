@@ -76,12 +76,17 @@ export function RepositoryOverview({
     );
   }
 
-  if (state.source.kind === 'non-repository') {
+  if (
+    state.source.kind === 'non-repository' ||
+    state.source.kind === 'failed'
+  ) {
     return (
       <main className="repository-overview repository-empty-state">
         <p className="eyebrow">Current Project</p>
         <h1 ref={worktreeTitle} tabIndex={-1}>
-          No Git Repository
+          {state.source.kind === 'non-repository'
+            ? 'No Git Repository'
+            : 'Repository unavailable'}
         </h1>
         <p>{state.source.message}</p>
         <code>{state.source.projectPath}</code>
@@ -99,8 +104,12 @@ export function RepositoryOverview({
     (worktree) => worktree.worktreeId === state.selectedWorktreeId,
   );
   const unavailableCount = snapshot.worktrees.filter(
-    (worktree) => worktree.status.kind === 'unavailable',
+    (worktree) =>
+      worktree.availability?.kind === 'unavailable' ||
+      (worktree.availability === undefined &&
+        worktree.status.kind === 'unavailable'),
   ).length;
+  const fetchAvailable = snapshot.fetchAvailable !== false;
 
   return (
     <main className="repository-overview">
@@ -148,7 +157,13 @@ export function RepositoryOverview({
           {snapshot.remotes.map((remote) => (
             <button
               aria-label={`Fetch ${remote.displayName} for ${snapshot.displayName}`}
+              disabled={!fetchAvailable}
               key={remote.remoteId}
+              title={
+                fetchAvailable
+                  ? undefined
+                  : 'Fetch actions are not available in this version.'
+              }
               type="button"
               onClick={() => store.requestFetch(remote.remoteId)}
             >
@@ -158,11 +173,20 @@ export function RepositoryOverview({
           {snapshot.remotes.length > 1 ? (
             <button
               aria-label={`Fetch all Remotes for ${snapshot.displayName}`}
+              disabled={!fetchAvailable}
+              title={
+                fetchAvailable
+                  ? undefined
+                  : 'Fetch actions are not available in this version.'
+              }
               type="button"
               onClick={() => store.requestFetch(null)}
             >
               Fetch all
             </button>
+          ) : null}
+          {!fetchAvailable && snapshot.remotes.length > 0 ? (
+            <p>Fetch actions are not available in this version.</p>
           ) : null}
         </div>
       </header>
@@ -423,8 +447,11 @@ function fetchLabel(
 function upstreamLabel(
   upstream: import('./repository-overview-model.js').UpstreamOverview,
 ): string {
-  if (upstream.kind === 'tracking')
-    return `${upstream.displayName} · ${upstream.ahead} ahead, ${upstream.behind} behind (cached)`;
+  if (upstream.kind === 'tracking') {
+    return upstream.ahead === null || upstream.behind === null
+      ? `${upstream.displayName} · comparison unavailable`
+      : `${upstream.displayName} · ${upstream.ahead} ahead, ${upstream.behind} behind (cached)`;
+  }
   if (upstream.kind === 'unpublished') return 'Unpublished';
   return upstream.reason;
 }
@@ -432,7 +459,9 @@ function upstreamLabel(
 function upstreamFreshnessLabel(
   upstream: import('./repository-overview-model.js').UpstreamOverview,
 ): string {
-  if (upstream.kind === 'not-applicable') return upstream.reason;
+  if (upstream.kind === 'not-applicable' || upstream.kind === 'unavailable') {
+    return upstream.reason;
+  }
   return upstream.fetchedAt === null
     ? 'No successful Fetch recorded'
     : `Cached from Fetch ${formatTime(upstream.fetchedAt)}`;

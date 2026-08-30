@@ -114,6 +114,50 @@ export const refreshStateSchema = z.discriminatedUnion('kind', [
   }),
 ]);
 
+export const fetchFreshnessSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('never') }),
+  z.strictObject({
+    kind: z.literal('current'),
+    fetchedAt: z.string().datetime(),
+  }),
+  z.strictObject({
+    kind: z.enum(['stale', 'failed']),
+    fetchedAt: z.string().datetime().nullable(),
+    message: z.string().min(1).max(512),
+  }),
+]);
+
+export const upstreamOverviewSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('tracking'),
+    displayName: z.string().min(1).max(1_024),
+    ahead: z.number().int().nonnegative().nullable(),
+    behind: z.number().int().nonnegative().nullable(),
+    fetchedAt: z.string().datetime().nullable(),
+  }),
+  z.strictObject({
+    kind: z.literal('unpublished'),
+    remoteName: z.string().min(1).max(256).nullable(),
+    fetchedAt: z.string().datetime().nullable(),
+  }),
+  z.strictObject({
+    kind: z.literal('not-applicable'),
+    reason: z.string().min(1).max(512),
+  }),
+  z.strictObject({
+    kind: z.literal('unavailable'),
+    reason: z.string().min(1).max(512),
+  }),
+]);
+
+export const worktreeAvailabilitySchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('available') }),
+  z.strictObject({
+    kind: z.literal('unavailable'),
+    reason: z.string().min(1).max(512),
+  }),
+]);
+
 export const headStateSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('initial') }),
   z.strictObject({
@@ -209,24 +253,48 @@ export const worktreeSnapshotSchema = z.strictObject({
   worktreeId: worktreeIdSchema,
   worktreeRevision: revisionSchema,
   generation: worktreeGenerationSchema,
+  role: z.enum(['main', 'linked']),
+  displayName: z.string().min(1).max(1_024),
+  path: z.string().min(1).max(4_096),
+  availability: worktreeAvailabilitySchema,
   freshness: refreshStateSchema,
   head: headStateSchema,
   indexTree: objectIdSchema.nullable(),
   status: worktreeStatusSchema,
+  upstream: upstreamOverviewSchema,
   changes: z.array(changedFileSchema).max(2_000).readonly(),
   nativeTargets: z.array(nativeTargetDescriptorSchema).readonly(),
 });
 
 export const repositorySnapshotSchema = z.strictObject({
+  kind: z.literal('repository'),
   repositoryId: repositoryIdSchema,
   repositoryRevision: revisionSchema,
   topologyRevision: revisionSchema,
   refsRevision: revisionSchema,
+  displayName: z.string().min(1).max(1_024),
+  path: z.string().min(1).max(4_096),
   refresh: refreshStateSchema,
+  fetch: fetchFreshnessSchema,
+  fetchAvailable: z.boolean(),
   worktrees: z.array(worktreeSnapshotSchema).readonly(),
   remotes: z.array(remoteSummarySchema).readonly(),
   operations: z.array(operationSummarySchema).readonly(),
 });
+
+export const repositorySnapshotResultSchema = z.union([
+  repositorySnapshotSchema,
+  z.strictObject({
+    kind: z.literal('non_repository'),
+    projectPath: z.string().min(1).max(4_096),
+    message: z.string().min(1).max(512),
+  }),
+  z.strictObject({
+    kind: z.literal('failed'),
+    projectPath: z.string().min(1).max(4_096),
+    message: z.string().min(1).max(512),
+  }),
+]);
 
 export type DiffRequest = z.infer<typeof diffRequestSchema>;
 export type DiffResult = z.infer<typeof diffResultSchema>;
@@ -235,4 +303,7 @@ export type BranchSearchResult = z.infer<typeof branchSearchResultSchema>;
 export type CommitDraftUpdate = z.infer<typeof commitDraftUpdateSchema>;
 export type CommitDraft = z.infer<typeof commitDraftSchema>;
 export type RepositorySnapshot = z.infer<typeof repositorySnapshotSchema>;
+export type RepositorySnapshotResult = z.infer<
+  typeof repositorySnapshotResultSchema
+>;
 export type WorktreeSnapshot = z.infer<typeof worktreeSnapshotSchema>;

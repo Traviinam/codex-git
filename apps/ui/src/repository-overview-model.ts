@@ -22,8 +22,8 @@ export type UpstreamOverview =
   | {
       readonly kind: 'tracking';
       readonly displayName: string;
-      readonly ahead: number;
-      readonly behind: number;
+      readonly ahead: number | null;
+      readonly behind: number | null;
       readonly fetchedAt: string | null;
     }
   | {
@@ -31,7 +31,8 @@ export type UpstreamOverview =
       readonly remoteName: string | null;
       readonly fetchedAt: string | null;
     }
-  | { readonly kind: 'not-applicable'; readonly reason: string };
+  | { readonly kind: 'not-applicable'; readonly reason: string }
+  | { readonly kind: 'unavailable'; readonly reason: string };
 
 export interface WorktreeOverviewSnapshot {
   readonly worktreeId: ProtocolWorktree['worktreeId'];
@@ -40,6 +41,7 @@ export interface WorktreeOverviewSnapshot {
   readonly role: 'main' | 'linked';
   readonly displayName: string;
   readonly path: string;
+  readonly availability?: ProtocolWorktree['availability'];
   readonly codexTitle?: string;
   readonly freshness: ProtocolWorktree['freshness'];
   readonly head: ProtocolWorktree['head'];
@@ -60,6 +62,7 @@ export interface RepositoryOverviewSnapshot {
   readonly path: string;
   readonly refresh: RepositorySnapshot['refresh'];
   readonly fetch: FetchFreshness;
+  readonly fetchAvailable?: boolean;
   readonly remotes: readonly ProtocolRemote[];
   readonly operations: readonly ProtocolOperation[];
   readonly worktrees: readonly WorktreeOverviewSnapshot[];
@@ -69,6 +72,11 @@ export type RepositoryOverviewSourceState =
   | { readonly kind: 'loading'; readonly message: string }
   | {
       readonly kind: 'non-repository';
+      readonly projectPath: string;
+      readonly message: string;
+    }
+  | {
+      readonly kind: 'failed';
       readonly projectPath: string;
       readonly message: string;
     }

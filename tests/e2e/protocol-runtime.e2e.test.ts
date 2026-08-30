@@ -1,5 +1,6 @@
-import { writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -7,7 +8,10 @@ import {
   startStandaloneRuntime,
   type StandaloneRuntime,
 } from '@codex-git/launcher';
-import { PROTOCOL_VERSION_HEADER } from '@codex-git/protocol';
+import {
+  PROTOCOL_VERSION_HEADER,
+  repositorySnapshotSchema,
+} from '@codex-git/protocol';
 
 import {
   createTemporaryGitRepository,
@@ -16,11 +20,17 @@ import {
 
 const runtimes: StandaloneRuntime[] = [];
 const repositories: TemporaryGitRepository[] = [];
+const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(runtimes.splice(0).map((runtime) => runtime.close()));
   await Promise.all(
     repositories.splice(0).map((repository) => repository.dispose()),
+  );
+  await Promise.all(
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
   );
 });
 
@@ -95,7 +105,108 @@ describe('protocol runtime composition', () => {
     expect(frame).toMatch(/"kind":"repository_revision"/u);
     await reader.cancel();
   });
+
+  it('serves an authoritative Repository overview snapshot', async () => {
+    const repository = await createRepositoryWithCommit();
+    const runtime = await startStandaloneRuntime({
+      projectPath: repository.path,
+      surfacePort: 0,
+    });
+    runtimes.push(runtime);
+    const surface = await (await fetch(runtime.surfaceUrl)).text();
+    expect(protocolBootstrap(surface)).toMatchObject({
+      projectPath: repository.path,
+      sessionUrl: runtime.sessionUrl.href,
+    });
+    const snapshotUrl = new URL(
+      runtime.sessionUrl.pathname.replace(/\/session$/u, '/snapshot'),
+      runtime.sessionUrl,
+    );
+
+    const response = await fetch(snapshotUrl, {
+      headers: {
+        origin: runtime.surfaceUrl.origin,
+        [PROTOCOL_VERSION_HEADER]: '1',
+      },
+    });
+    const body = await response.json();
+    const canonicalPath = await realpath(repository.path);
+    const branchName = (
+      await repository.git('branch', '--show-current')
+    ).stdout.trim();
+
+    expect(response.status).toBe(200);
+    expect(repositorySnapshotSchema.safeParse(body).success).toBe(true);
+    expect(body).toMatchObject({
+      displayName: repository.path.split('/').at(-1),
+      path: canonicalPath,
+      refresh: { kind: 'current' },
+      fetch: { kind: 'never' },
+      fetchAvailable: false,
+      worktrees: [
+        {
+          role: 'main',
+          displayName: repository.path.split('/').at(-1),
+          path: canonicalPath,
+          availability: { kind: 'available' },
+          freshness: { kind: 'current' },
+          head: { kind: 'local_branch', displayName: branchName },
+          status: { kind: 'clean' },
+          upstream: { kind: 'unpublished' },
+        },
+      ],
+    });
+  });
+
+  it('serves a typed non-Repository result for the Current Project', async () => {
+    const projectPath = await mkdtemp(join(tmpdir(), 'codex-git-project-'));
+    temporaryDirectories.push(projectPath);
+    const runtime = await startStandaloneRuntime({
+      projectPath,
+      surfacePort: 0,
+    });
+    runtimes.push(runtime);
+    const snapshotUrl = new URL(
+      runtime.sessionUrl.pathname.replace(/\/session$/u, '/snapshot'),
+      runtime.sessionUrl,
+    );
+
+    const response = await fetch(snapshotUrl, {
+      headers: {
+        origin: runtime.surfaceUrl.origin,
+        [PROTOCOL_VERSION_HEADER]: '1',
+      },
+    });
+
+    expect({ body: await response.json(), status: response.status }).toEqual({
+      body: {
+        kind: 'non_repository',
+        projectPath,
+        message: 'The Current Project is not inside a Git Repository.',
+      },
+      status: 200,
+    });
+  });
 });
+
+function protocolBootstrap(surface: string): unknown {
+  const match = surface.match(
+    /globalThis\.__CODEX_GIT_PROTOCOL__ = (\{.*?\});/u,
+  );
+  if (match === null) throw new Error('Protocol bootstrap is absent.');
+  return JSON.parse(match[1] ?? '{}');
+}
+
+async function createRepositoryWithCommit(): Promise<TemporaryGitRepository> {
+  const repository = await createTemporaryGitRepository();
+  repositories.push(repository);
+  await repository.git('config', 'user.name', 'Codex Git Tests');
+  await repository.git('config', 'user.email', 'codex-git@example.test');
+  await writeFile(join(repository.path, 'README.md'), 'fixture\n');
+  await repository.git('add', '--', 'README.md');
+  await repository.git('commit', '--quiet', '-m', 'Create fixture');
+  return repository;
+}
 
 async function readFrameWithin(
   reader: ReadableStreamDefaultReader<Uint8Array>,
