@@ -24,6 +24,8 @@ export type RemoteGitReader = (
 ) => Promise<Uint8Array>;
 
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
+const remoteConfigPattern =
+  '^remote\\..+\\.(url|pushurl|fetch|push|mirror|prune|prunetags|tagopt|skipdefaultupdate|skipfetchall)$';
 const validHost =
   /^(?:\[[\da-f:.]+\]|[\da-z](?:[\da-z.-]*[\da-z])?)(?::\d{1,5})?$/iu;
 
@@ -60,32 +62,48 @@ export async function observeRemotes(
               '--includes',
               '--null',
               '--get-regexp',
-              '^remote\\..+\\..+$',
+              remoteConfigPattern,
             ],
             true,
           ),
         );
   const resolved = await Promise.all(
-    names.map(async (displayName) => ({
-      displayName,
-      endpoint: decodeLine(
+    names.map(async (displayName) => {
+      const fetchEndpoint = decodeLine(
         await readGit(
           [...contextArgs, 'ls-remote', '--get-url', '--', displayName],
           true,
         ),
-      ),
-    })),
+      );
+      const configuredPushEndpoints = configured
+        .filter(({ key }) => key === `remote.${displayName}.pushurl`)
+        .map(({ value }) => value);
+      const pushEndpoints =
+        configuredPushEndpoints.length === 0
+          ? [fetchEndpoint]
+          : await Promise.all(
+              configuredPushEndpoints.map(async (endpoint) =>
+                decodeLine(
+                  await readGit(
+                    [...contextArgs, 'ls-remote', '--get-url', '--', endpoint],
+                    true,
+                  ),
+                ),
+              ),
+            );
+      return { displayName, fetchEndpoint, pushEndpoints };
+    }),
   );
 
   const retained = new Map<string, RemoteId>();
-  const remotes = resolved.map(({ displayName, endpoint }) => {
+  const remotes = resolved.map(({ displayName, fetchEndpoint }) => {
     const remoteId =
       identity.identities.get(displayName) ?? ids.issue('remote');
     retained.set(displayName, remoteId);
     return {
       remoteId,
       displayName,
-      host: sanitizeRemoteHost(endpoint),
+      host: sanitizeRemoteHost(fetchEndpoint),
     };
   });
   identity.identities = retained;
@@ -129,7 +147,7 @@ function parseRemoteConfig(output: Uint8Array): readonly ConfigEntry[] {
       throw new Error('Git returned malformed Remote configuration.');
     }
     const key = record.slice(0, separator);
-    if (!/^remote\..+\..+$/u.test(key)) {
+    if (!new RegExp(remoteConfigPattern, 'u').test(key)) {
       throw new Error('Git returned configuration outside the Remote scope.');
     }
     entries.push({ key, value: record.slice(separator + 1) });
@@ -149,7 +167,7 @@ function sanitizeRemoteHost(endpoint: string | undefined): string {
       return 'local';
     }
     const host = url.host.toLowerCase();
-    return validHost.test(host) ? host : 'unknown';
+    return host.length <= 1_024 && validHost.test(host) ? host : 'unknown';
   } catch {
     // Git's scp-like syntax is not a URL. Strip user and path before validation.
     const match = /^(?:[^@/:\s]+@)?(\[[\da-fA-F:.]+\]|[^/:\s]+):/u.exec(
@@ -157,7 +175,7 @@ function sanitizeRemoteHost(endpoint: string | undefined): string {
     );
     if (match !== null) {
       const host = (match[1] ?? '').toLowerCase();
-      return validHost.test(host) ? host : 'unknown';
+      return host.length <= 1_024 && validHost.test(host) ? host : 'unknown';
     }
     return 'local';
   }

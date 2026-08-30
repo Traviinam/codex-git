@@ -29,11 +29,19 @@ describe('Repository observation Git recipes', () => {
       }
       if (args.includes('config')) {
         return Buffer.from(
-          'remote.origin.url\nhttps://user:secret@example.test/repository.git\0',
+          [
+            'remote.origin.url\nhttps://user:secret@example.test/repository.git',
+            'remote.origin.pushurl\npush-alias:repository.git',
+            '',
+          ].join('\0'),
         );
       }
       if (args.includes('ls-remote')) {
-        return Buffer.from('https://user:secret@example.test/repository.git\n');
+        return Buffer.from(
+          args.at(-1) === 'origin'
+            ? 'https://user:secret@example.test/repository.git\n'
+            : 'ssh://git@push.example/repository.git\n',
+        );
       }
       if (args.includes('status')) {
         return Buffer.from(`# branch.oid ${objectId}\0# branch.head main\0`);
@@ -75,11 +83,22 @@ describe('Repository observation Git recipes', () => {
           '--includes',
           '--null',
           '--get-regexp',
-          '^remote\\..+\\..+$',
+          '^remote\\..+\\.(url|pushurl|fetch|push|mirror|prune|prunetags|tagopt|skipdefaultupdate|skipfetchall)$',
         ],
         true,
       ),
       recipe(['-C', path, 'ls-remote', '--get-url', '--', 'origin'], true),
+      recipe(
+        [
+          '-C',
+          path,
+          'ls-remote',
+          '--get-url',
+          '--',
+          'push-alias:repository.git',
+        ],
+        true,
+      ),
     ];
     expect(calls).toEqual([
       ...sharedRecipes,

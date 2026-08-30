@@ -108,6 +108,12 @@ describe('Repository observation', () => {
     expect(reconfigured.repositoryRevision).toBe(
       initial.repositoryRevision + 1,
     );
+    await repository.git('config', 'remote.origin.customSecret', 'do-not-read');
+    const ignoredCustomValue = await snapshotRepository(session);
+    expect(ignoredCustomValue.refsRevision).toBe(reconfigured.refsRevision);
+    expect(ignoredCustomValue.repositoryRevision).toBe(
+      reconfigured.repositoryRevision,
+    );
 
     await repository.git('remote', 'remove', 'origin');
     const removed = await snapshotRepository(session);
@@ -124,6 +130,22 @@ describe('Repository observation', () => {
       host: 'example.test',
     });
     expect(recreated.remotes[0]?.remoteId).not.toBe(initialRemote.remoteId);
+    await session.close();
+  });
+
+  it('never publishes a Remote host outside the protocol length limit', async () => {
+    const repository = await createRepositoryWithCommit();
+    await repository.git(
+      'remote',
+      'add',
+      'oversized',
+      `ssh://git@${'a'.repeat(1_025)}/repository.git`,
+    );
+    const session = await createRepositoryEngine().open(
+      repository.path as AbsolutePath,
+    );
+    const snapshot = await snapshotRepository(session);
+    expect(snapshot.remotes[0]?.host).toBe('unknown');
     await session.close();
   });
 

@@ -637,7 +637,6 @@ function runGit(
           reject(
             new GitCommandError(
               typeof error.code === 'number' ? error.code : null,
-              error.message,
               error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
                 ? 'output_too_large'
                 : 'command_failed',
@@ -685,10 +684,9 @@ function closeSession(state: SessionState): void {
 class GitCommandError extends Error {
   constructor(
     readonly exitCode: number | null,
-    message: string,
     readonly failure: 'command_failed' | 'output_too_large',
   ) {
-    super(message);
+    super('The Git process did not produce a valid local observation.');
     this.name = 'GitCommandError';
   }
 }

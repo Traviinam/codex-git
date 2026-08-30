@@ -304,11 +304,7 @@ function parseRefs(output: Uint8Array): readonly RefSnapshot[] {
       : fullName.startsWith('refs/remotes/')
         ? 'remote_tracking'
         : null;
-    if (
-      kind !== null &&
-      symbolicTarget.length === 0 &&
-      /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(objectId)
-    ) {
+    if (kind !== null && symbolicTarget.length === 0 && isObjectId(objectId)) {
       refs.push({ kind, fullName, objectId });
     }
   }
@@ -382,7 +378,7 @@ function observedHead(
   const objectId =
     branchObjectId === '(initial)'
       ? null
-      : /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(branchObjectId)
+      : isObjectId(branchObjectId)
         ? branchObjectId
         : undefined;
   if (objectId === undefined) {
@@ -463,6 +459,10 @@ function sameSharedObservation(
 
 function fingerprintBytes(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function isObjectId(value: string): boolean {
+  return /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(value);
 }
 
 function decodeLine(output: Uint8Array): string {
