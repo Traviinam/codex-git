@@ -123,6 +123,132 @@ describe('operation session', () => {
     ]);
   });
 
+  it('tracks deferred Busy reconciliation through bounded close', async () => {
+    const timeout = controlledTimeout();
+    const activeExecution = deferred<string>();
+    const busyReconciliation = deferred<void>();
+    const published: OperationSessionSummary[] = [];
+    const session = createOperationSession({
+      closeTimeoutMilliseconds: 250,
+      publish: (summary) => published.push(summary),
+      timeoutScheduler: timeout.scheduler,
+    });
+    let blockedExecutions = 0;
+    const active = await session.dispatch(
+      commitOperation(
+        generation('1'),
+        'refs/heads/topic',
+        activeExecution.promise,
+      ),
+    );
+    const busyPromise = session.dispatch({
+      ...branchOperation(generation('2'), 'refs/heads/topic', 'must not run'),
+      execute: async () => {
+        blockedExecutions += 1;
+        return 'must not run';
+      },
+      reconcileBusy: () => busyReconciliation.promise,
+    });
+
+    await until(() =>
+      published.some(
+        ({ category, phase }) =>
+          category === 'branch_switch' && phase === 'reconciling',
+      ),
+    );
+    const busyOperation = published.find(
+      ({ category }) => category === 'branch_switch',
+    );
+    if (busyOperation === undefined) throw new Error('Expected BUSY operation');
+    activeExecution.resolve('active evidence');
+    await session.recover(acceptedId(active));
+
+    const close = session.close();
+    timeout.trigger();
+    await expect(close).resolves.toEqual({
+      kind: 'timed_out',
+      pendingOperationIds: [busyOperation.operationId],
+    });
+    expect(blockedExecutions).toBe(0);
+    expect(published.at(-1)).toMatchObject({
+      cancellationRequested: true,
+      category: 'branch_switch',
+      phase: 'reconciling',
+      retryAllowed: false,
+      timedOut: true,
+    });
+
+    busyReconciliation.resolve();
+    await expect(busyPromise).resolves.toMatchObject({
+      kind: 'rejected',
+      result: { kind: 'rejected', code: 'busy' },
+    });
+  });
+
+  it('settles throwing Busy reconciliation as a sanitized Unknown lease', async () => {
+    const activeExecution = deferred<string>();
+    const published: OperationSessionSummary[] = [];
+    const session = createOperationSession({
+      publish: (summary) => published.push(summary),
+    });
+    let blockedExecutions = 0;
+    let busyReconciliations = 0;
+    const active = await session.dispatch(
+      commitOperation(
+        generation('1'),
+        'refs/heads/topic',
+        activeExecution.promise,
+      ),
+    );
+    const unknown = await session.dispatch({
+      ...branchOperation(generation('2'), 'refs/heads/topic', 'must not run'),
+      execute: async () => {
+        blockedExecutions += 1;
+        return 'must not run';
+      },
+      reconcileBusy: async () => {
+        busyReconciliations += 1;
+        throw new Error('sensitive Repository path and process stderr');
+      },
+    });
+
+    expect(unknown).toMatchObject({
+      kind: 'unknown_outcome',
+      result: {
+        kind: 'unknown_outcome',
+        code: 'reconciliation_incomplete',
+        message: 'Reconciliation could not establish the operation outcome.',
+        recoveryAvailable: true,
+      },
+      conflicts: [{ category: 'commit' }],
+    });
+    if (unknown.kind !== 'unknown_outcome') {
+      throw new Error('Expected Unknown Outcome');
+    }
+    expect(blockedExecutions).toBe(0);
+    expect(JSON.stringify(unknown)).not.toContain('sensitive');
+    expect(published.at(-1)).toMatchObject({
+      category: 'branch_switch',
+      phase: 'terminal',
+      retryAllowed: false,
+    });
+
+    await expect(session.recover(unknown.result.operationId)).resolves.toEqual(
+      unknown.result,
+    );
+    expect(busyReconciliations).toBe(2);
+    activeExecution.resolve('active evidence');
+    await session.recover(acceptedId(active));
+
+    const retry = await session.dispatch(
+      branchOperation(generation('2'), 'refs/heads/topic', 'must not run'),
+    );
+    expect(retry).toMatchObject({
+      kind: 'rejected',
+      result: { code: 'busy' },
+    });
+  });
+
   it('keeps Unknown leases while starting deduplicated recovery in the background', async () => {
     const recovery = deferred<ReconciledOperationResult>();
     const worktreeGeneration = generation('4');

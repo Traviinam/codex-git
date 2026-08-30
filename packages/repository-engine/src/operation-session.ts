@@ -38,6 +38,11 @@ export type OperationSessionAdmission =
       readonly result: Extract<OperationResult, { kind: 'rejected' }>;
       readonly conflicts: readonly OperationSessionSummary[];
     }
+  | {
+      readonly kind: 'unknown_outcome';
+      readonly result: Extract<OperationResult, { kind: 'unknown_outcome' }>;
+      readonly conflicts: readonly OperationSessionSummary[];
+    }
   | { readonly kind: 'closed' };
 
 export type OperationSessionOptions = Omit<
@@ -59,10 +64,14 @@ export interface OperationSession {
 
 interface SessionRecord
   extends OperationCoordination, CoordinatorLifecycleRecord {
+  readonly reconcileBusy: (context: {
+    readonly conflicts: readonly OperationSessionSummary[];
+  }) => Promise<void>;
   readonly execute: (context: { signal: AbortSignal }) => Promise<unknown>;
   readonly reconcile: (
     context: OperationReconciliationContext<unknown>,
   ) => Promise<ReconciledOperationResult>;
+  busyConflicts?: readonly OperationSessionSummary[];
   execution?: OperationExecution<unknown>;
 }
 
@@ -133,18 +142,23 @@ class Session implements OperationSession {
     conflicts: readonly SessionRecord[],
   ): Promise<OperationSessionAdmission> {
     const conflictSummaries = conflicts.map(summarize);
-    await operation.reconcileBusy({ conflicts: conflictSummaries });
-    if (!this.#lifecycle.open) return { kind: 'closed' };
-
-    const record = this.#record(operation, coordination, false);
+    const record = this.#record(operation, coordination, true);
+    record.busyConflicts = conflictSummaries;
     if (!this.#lifecycle.addTerminal(record)) return { kind: 'closed' };
-    const result = withId(record.id, {
-      kind: 'rejected',
-      code: 'busy',
-      message: 'A conflicting operation is active.',
-    }) as Extract<OperationResult, { kind: 'rejected' }>;
-    this.#lifecycle.settle(record, result);
-    return { kind: 'rejected', result, conflicts: conflictSummaries };
+    const result = await this.#lifecycle.reconcile(record, () =>
+      this.#attempt(record),
+    );
+    if (result.kind === 'rejected') {
+      return { kind: 'rejected', result, conflicts: conflictSummaries };
+    }
+    if (result.kind === 'unknown_outcome') {
+      return {
+        kind: 'unknown_outcome',
+        result,
+        conflicts: conflictSummaries,
+      };
+    }
+    throw new Error('BUSY reconciliation produced an invalid outcome.');
   }
 
   async #run(record: SessionRecord) {
@@ -160,11 +174,21 @@ class Session implements OperationSession {
   }
 
   #reconcile(record: SessionRecord) {
-    if (record.execution === undefined) return record.settled;
+    if (record.execution === undefined && record.busyConflicts === undefined) {
+      return record.settled;
+    }
     return this.#lifecycle.reconcile(record, () => this.#attempt(record));
   }
 
   async #attempt(record: SessionRecord) {
+    if (record.busyConflicts !== undefined) {
+      await record.reconcileBusy({ conflicts: record.busyConflicts });
+      return withId(record.id, {
+        kind: 'rejected',
+        code: 'busy',
+        message: 'A conflicting operation is active.',
+      });
+    }
     const outcome = await record.reconcile({
       cancellationRequested: record.cancellationRequested,
       execution: record.execution as OperationExecution<unknown>,
@@ -187,6 +211,7 @@ class Session implements OperationSession {
       id: this.#ids.issue('operation'),
       lease,
       phase: 'accepted',
+      reconcileBusy: (context) => operation.reconcileBusy(context),
       reconcile: (context) =>
         operation.reconcile(
           context as OperationReconciliationContext<Evidence>,
