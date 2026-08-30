@@ -1,6 +1,19 @@
-import type { OperationId, OperationResult } from '@codex-git/protocol';
+import type {
+  OperationId,
+  OperationResult,
+  RepositorySnapshot,
+} from '@codex-git/protocol';
 
-type OperationPhase = 'accepted' | 'running' | 'reconciling' | 'terminal';
+type OperationPhase = RepositorySnapshot['operations'][number]['phase'];
+
+interface TimeoutScheduler {
+  schedule(
+    milliseconds: number,
+    onTimeout: () => void,
+  ): {
+    cancel(): void;
+  };
+}
 
 export interface ManagedOperationRecord {
   readonly id: OperationId;
@@ -28,6 +41,7 @@ export interface OperationLifecycleStoreOptions<
   readonly publish?: (summary: Summary) => void;
   readonly summarize: (record: Record) => Summary;
   readonly terminalRetention?: number;
+  readonly timeoutScheduler?: TimeoutScheduler;
 }
 
 export interface OperationLifecycleStore<
@@ -60,6 +74,7 @@ class LifecycleStore<
   readonly #retained = new Set<OperationId>();
   readonly #retention: number;
   readonly #summarize: (record: Record) => Summary;
+  readonly #timeoutScheduler: TimeoutScheduler;
   #closePromise?: Promise<LifecycleCloseResult>;
   #publishing = false;
   #state: 'open' | 'closing' | 'closed' = 'open';
@@ -75,6 +90,7 @@ class LifecycleStore<
     );
     this.#observer = options.publish ?? (() => undefined);
     this.#summarize = options.summarize;
+    this.#timeoutScheduler = options.timeoutScheduler ?? systemTimeoutScheduler;
   }
 
   get open() {
@@ -100,6 +116,7 @@ class LifecycleStore<
 
   publish(record: Record) {
     if (this.#isClosed()) return false;
+    this.#assertRegistered(record);
     let summary: Summary;
     try {
       summary = this.#summarize(record);
@@ -160,6 +177,7 @@ class LifecycleStore<
     const completed = await waitBounded(
       Promise.all(tracked.map(({ settled }) => settled)),
       this.#closeTimeout,
+      this.#timeoutScheduler,
     );
     this.#state = 'closed';
     this.#publicationQueue.length = 0;
@@ -246,17 +264,39 @@ function milliseconds(value: number, name: string) {
   return validated;
 }
 
-async function waitBounded(pending: Promise<unknown>, timeout: number) {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const completed = await Promise.race([
-    pending.then(() => true),
-    new Promise<false>((resolve) => {
-      timer = setTimeout(() => resolve(false), timeout);
-    }),
-  ]);
-  if (timer !== undefined) clearTimeout(timer);
-  return completed;
+function waitBounded(
+  pending: Promise<unknown>,
+  timeout: number,
+  scheduler: TimeoutScheduler,
+) {
+  return new Promise<boolean>((resolve) => {
+    let complete = false;
+    let cancelAfterSchedule = false;
+    let cancelTimer = () => {
+      cancelAfterSchedule = true;
+    };
+    const finish = (result: boolean) => {
+      if (complete) return;
+      complete = true;
+      cancelTimer();
+      resolve(result);
+    };
+    const timer = scheduler.schedule(timeout, () => finish(false));
+    cancelTimer = () => timer.cancel();
+    if (cancelAfterSchedule) timer.cancel();
+    void pending.then(
+      () => finish(true),
+      () => finish(true),
+    );
+  });
 }
+
+const systemTimeoutScheduler: TimeoutScheduler = {
+  schedule(milliseconds, onTimeout) {
+    const timer = setTimeout(onTimeout, milliseconds);
+    return { cancel: () => clearTimeout(timer) };
+  },
+};
 
 function deferred<Value>() {
   let resolve!: (value: Value) => void;

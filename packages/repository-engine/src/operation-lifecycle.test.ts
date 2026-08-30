@@ -116,7 +116,11 @@ describe('operation lifecycle store', () => {
   });
 
   it('drains only active, reconciling, and Unknown records during close', async () => {
-    const store = createStore({ closeTimeoutMilliseconds: 1_000 });
+    const timeout = controlledTimeout();
+    const store = createStore({
+      closeTimeoutMilliseconds: 1_000,
+      timeoutScheduler: timeout.scheduler,
+    });
     const known = knownRecord('1', 'known');
     const active = liveRecord('2', 'active', 'running');
     const reconciling = liveRecord('3', 'reconciling', 'reconciling');
@@ -156,20 +160,33 @@ describe('operation lifecycle store', () => {
     completions.get(active.id)!.resolve();
 
     await expect(close).resolves.toEqual({ kind: 'drained' });
+    expect(timeout.cancellations).toBe(1);
   });
 
   it('returns the exact pending records when bounded close times out', async () => {
-    const store = createStore({ closeTimeoutMilliseconds: 5 });
+    const timeout = controlledTimeout();
+    const store = createStore({
+      closeTimeoutMilliseconds: 50,
+      timeoutScheduler: timeout.scheduler,
+    });
     const completed = liveRecord('1', 'completed', 'running');
     const pending = liveRecord('2', 'pending', 'reconciling');
     const never = deferred();
     expect(store.add(completed)).toBe(true);
     expect(store.add(pending)).toBe(true);
 
-    const result = await store.close({
+    const close = store.close({
       drain: (record) =>
         record.id === completed.id ? Promise.resolve() : never.promise,
     });
+    let result: Awaited<typeof close> | undefined;
+    void close.then((value) => {
+      result = value;
+    });
+    await Promise.resolve();
+    expect(timeout.delay).toBe(50);
+    timeout.trigger();
+    await until(() => result !== undefined);
 
     expect(result).toEqual({
       kind: 'timed_out',
@@ -194,6 +211,24 @@ describe('operation lifecycle store', () => {
     const record = liveRecord('1', 'live', 'running');
     expect(store.add(record)).toBe(true);
     expect(() => store.add({ ...record })).toThrow('already registered');
+
+    let summaries = 0;
+    let publications = 0;
+    const ownership = createOperationLifecycleStore<TestRecord, TestSummary>({
+      publish: () => {
+        publications += 1;
+      },
+      summarize: ({ label }) => {
+        summaries += 1;
+        return { label };
+      },
+    });
+    const owned = liveRecord('2', 'owned', 'running');
+    expect(ownership.add(owned)).toBe(true);
+    const foreignSameId = { ...owned, label: 'foreign' };
+    expect(() => ownership.publish(foreignSameId)).toThrow('not registered');
+    expect(summaries).toBe(0);
+    expect(publications).toBe(0);
   });
 });
 
@@ -201,6 +236,9 @@ function createStore(
   options: {
     readonly closeTimeoutMilliseconds?: number;
     readonly terminalRetention?: number;
+    readonly timeoutScheduler?: ReturnType<
+      typeof controlledTimeout
+    >['scheduler'];
   } = {},
 ) {
   return createOperationLifecycleStore<TestRecord, TestSummary>({
@@ -263,4 +301,43 @@ function deferred() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+async function until(predicate: () => boolean) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error('Condition was not reached.');
+}
+
+function controlledTimeout() {
+  let callback: (() => void) | undefined;
+  let cancellations = 0;
+  let delay: number | undefined;
+  return {
+    get cancellations() {
+      return cancellations;
+    },
+    get delay() {
+      return delay;
+    },
+    scheduler: {
+      schedule(milliseconds: number, onTimeout: () => void) {
+        delay = milliseconds;
+        callback = onTimeout;
+        return {
+          cancel() {
+            cancellations += 1;
+            callback = undefined;
+          },
+        };
+      },
+    },
+    trigger() {
+      const scheduled = callback;
+      callback = undefined;
+      scheduled?.();
+    },
+  };
 }
