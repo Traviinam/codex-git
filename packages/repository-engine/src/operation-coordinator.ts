@@ -27,14 +27,20 @@ export interface CoordinatedOperationSummary extends OperationSummary {
   readonly retryAllowed: boolean;
 }
 
+export interface OperationReconciliationContext<Evidence> {
+  readonly cancellationRequested: boolean;
+  readonly execution: OperationExecution<Evidence>;
+  readonly timedOut: boolean;
+}
+
 interface Hooks<Evidence> {
   reconcileBusy(context: {
     readonly conflicts: readonly CoordinatedOperationSummary[];
   }): Promise<void>;
   execute(context: { readonly signal: AbortSignal }): Promise<Evidence>;
-  reconcile(context: {
-    readonly execution: OperationExecution<Evidence>;
-  }): Promise<ReconciledOperationResult>;
+  reconcile(
+    context: OperationReconciliationContext<Evidence>,
+  ): Promise<ReconciledOperationResult>;
 }
 
 export type BranchTarget =
@@ -97,18 +103,18 @@ export interface OperationCoordinator {
   recover(operationId: OperationId): Promise<OperationResult>;
 }
 
-interface Coordination {
+export interface OperationCoordination {
   readonly category: OperationSummary['category'];
   readonly claims: ReadonlySet<string>;
   readonly lane: string;
 }
 
-interface RecordState extends Coordination {
+interface RecordState extends OperationCoordination {
   readonly execute: (context: { signal: AbortSignal }) => Promise<unknown>;
   readonly id: OperationId;
-  readonly reconcile: (context: {
-    execution: OperationExecution<unknown>;
-  }) => Promise<ReconciledOperationResult>;
+  readonly reconcile: (
+    context: OperationReconciliationContext<unknown>,
+  ) => Promise<ReconciledOperationResult>;
   readonly settled: Promise<OperationResult>;
   readonly settle: (result: OperationResult) => void;
   execution?: OperationExecution<unknown>;
@@ -125,8 +131,7 @@ class Coordinator implements OperationCoordinator {
   async dispatch<Evidence>(
     operation: CoordinatedOperation<Evidence>,
   ): Promise<OperationAdmission> {
-    const coordination = derive(operation);
-    assertHooks(operation);
+    const coordination = coordinateOperation(operation);
     const conflicts = this.#conflicts(coordination);
 
     const unknown = conflicts.filter(
@@ -157,7 +162,7 @@ class Coordinator implements OperationCoordinator {
 
   #admit<Evidence>(
     operation: CoordinatedOperation<Evidence>,
-    coordination: Coordination,
+    coordination: OperationCoordination,
   ): OperationAdmission {
     const record = this.#record(operation, coordination, true, 'running');
     this.#operations.set(record.id, record);
@@ -167,7 +172,7 @@ class Coordinator implements OperationCoordinator {
 
   async #rejectBusy<Evidence>(
     operation: CoordinatedOperation<Evidence>,
-    coordination: Coordination,
+    coordination: OperationCoordination,
     conflicts: readonly RecordState[],
   ): Promise<OperationAdmission> {
     const conflictSummaries = conflicts.map(summary);
@@ -207,7 +212,9 @@ class Coordinator implements OperationCoordinator {
     const promise = Promise.resolve()
       .then(() =>
         record.reconcile({
+          cancellationRequested: false,
           execution: record.execution as OperationExecution<unknown>,
+          timedOut: false,
         }),
       )
       .then((outcome) => this.#settle(record, outcome))
@@ -230,7 +237,7 @@ class Coordinator implements OperationCoordinator {
 
   #record<Evidence>(
     operation: CoordinatedOperation<Evidence>,
-    coordination: Coordination,
+    coordination: OperationCoordination,
     lease: boolean,
     phase: OperationSummary['phase'],
   ): RecordState {
@@ -243,19 +250,17 @@ class Coordinator implements OperationCoordinator {
       phase,
       reconcile: (context) =>
         operation.reconcile(
-          context as { execution: OperationExecution<Evidence> },
+          context as OperationReconciliationContext<Evidence>,
         ),
       settle: done.resolve,
       settled: done.promise,
     };
   }
 
-  #conflicts(candidate: Coordination) {
+  #conflicts(candidate: OperationCoordination) {
     return [...this.#operations.values()].filter(
       (record) =>
-        record.lease &&
-        (record.lane === candidate.lane ||
-          overlaps(record.claims, candidate.claims)),
+        record.lease && operationCoordinationConflicts(record, candidate),
     );
   }
 }
@@ -264,7 +269,24 @@ export function createOperationCoordinator(): OperationCoordinator {
   return new Coordinator();
 }
 
-function derive(operation: CoordinatedOperation<unknown>): Coordination {
+export function coordinateOperation(
+  operation: CoordinatedOperation<unknown>,
+): OperationCoordination {
+  const coordination = derive(operation);
+  assertHooks(operation);
+  return coordination;
+}
+
+export function operationCoordinationConflicts(
+  left: OperationCoordination,
+  right: OperationCoordination,
+) {
+  return left.lane === right.lane || overlaps(left.claims, right.claims);
+}
+
+function derive(
+  operation: CoordinatedOperation<unknown>,
+): OperationCoordination {
   if ('lane' in operation || 'claims' in operation || 'category' in operation) {
     throw new Error('Coordination is derived from the operation kind.');
   }
@@ -370,7 +392,7 @@ function local(
   category: 'commit' | 'stage' | 'unstage',
   generation: WorktreeGeneration,
   claims: ReadonlySet<string>,
-): Coordination {
+): OperationCoordination {
   return { category, claims, lane: key('local', generation) };
 }
 
