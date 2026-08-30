@@ -55,7 +55,7 @@ export async function startStandaloneRuntime(
     await Promise.all([
       hostConnection?.close(),
       repositorySession?.close(),
-      traceClose('surface', () => surfaceServer?.close()),
+      closeSurfaceServer(surfaceServer),
       protocolServer?.close(),
     ]);
     await invalidationPump;
@@ -111,7 +111,6 @@ export async function startStandaloneRuntime(
       },
     });
     await surfaceServer.listen();
-    traceSurfaceClosePhases(surfaceServer);
 
     const surfaceUrl = serverUrl(surfaceServer.httpServer, '/');
     protocolServer.allowOrigin(surfaceUrl.origin);
@@ -142,72 +141,12 @@ export async function startStandaloneRuntime(
   }
 }
 
-interface CloseableResource {
-  close(): Promise<unknown>;
-}
-
-interface TraceableClientEnvironment extends CloseableResource {
-  readonly depsOptimizer?: CloseableResource;
-  readonly pluginContainer: CloseableResource;
-  readonly _pendingRequests: Map<
-    unknown,
-    { readonly request: Promise<unknown> }
-  >;
-}
-
-function traceSurfaceClosePhases(server: ViteDevServer): void {
-  traceCloseMethod(server.watcher, 'surface:watcher');
-  traceCloseMethod(server.ws, 'surface:websocket');
-  for (const [name, environment] of Object.entries(server.environments)) {
-    if (name === 'client') {
-      traceClientEnvironmentClose(
-        environment as unknown as TraceableClientEnvironment,
-      );
-    } else {
-      traceCloseMethod(environment, `surface:environment:${name}`);
-    }
-  }
-  server.httpServer?.once('close', () => {
-    process.stderr.write('[DEBUG-close-runtime] surface:http:done\n');
-  });
-}
-
-function traceClientEnvironmentClose(
-  environment: TraceableClientEnvironment,
-): void {
-  traceCloseMethod(
-    environment.pluginContainer,
-    'surface:environment:client:plugins',
-  );
-  if (environment.depsOptimizer !== undefined) {
-    traceCloseMethod(
-      environment.depsOptimizer,
-      'surface:environment:client:deps',
-    );
-  }
-  const close = environment.close.bind(environment);
-  environment.close = async () => {
-    process.stderr.write(
-      `[DEBUG-close-runtime] surface:environment:client:pending:${environment._pendingRequests.size}\n`,
-    );
-    await traceClose('surface:environment:client', close);
-  };
-}
-
-function traceCloseMethod(target: CloseableResource, label: string): void {
-  const close = target.close.bind(target);
-  target.close = async () => {
-    await traceClose(label, close);
-  };
-}
-
-async function traceClose(
-  label: string,
-  close: () => Promise<unknown> | undefined,
+async function closeSurfaceServer(
+  server: ViteDevServer | undefined,
 ): Promise<void> {
-  process.stderr.write(`[DEBUG-close-runtime] ${label}:start\n`);
-  await close();
-  process.stderr.write(`[DEBUG-close-runtime] ${label}:done\n`);
+  if (server === undefined) return;
+  await server.environments.client?.waitForRequestsIdle();
+  await server.close();
 }
 
 async function performFileNativeAction(
