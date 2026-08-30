@@ -1,10 +1,13 @@
 import type { Plugin } from 'vite';
 
-export function protocolBootstrapPlugin(sessionUrl: URL): Plugin {
-  const bootstrap = JSON.stringify({ sessionUrl: sessionUrl.href }).replaceAll(
-    '<',
-    '\\u003c',
-  );
+export function protocolBootstrapPlugin(
+  sessionUrl: URL,
+  projectPath?: string,
+): Plugin {
+  const bootstrap = JSON.stringify({
+    sessionUrl: sessionUrl.href,
+    ...(projectPath === undefined ? {} : { projectPath }),
+  }).replaceAll('<', '\\u003c');
 
   return {
     name: 'codex-git-protocol-bootstrap',

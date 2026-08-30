@@ -110,6 +110,56 @@ describe('Repository overview', () => {
     expect(emptyMarkup).not.toContain('Fetch');
   });
 
+  it('disables Fetch entry points when the runtime has no Fetch capability', () => {
+    const fixture = createOverviewFixture('one-worktree');
+    const source = fixture.source.getSnapshot();
+    if (source.kind !== 'repository')
+      throw new Error('Expected Repository fixture');
+    fixture.publish({
+      kind: 'repository',
+      snapshot: { ...source.snapshot, fetchAvailable: false },
+    });
+
+    const markup = renderToStaticMarkup(
+      <App store={createRepositoryStore(fixture.source)} />,
+    );
+
+    expect(markup).toContain(
+      'Fetch actions are not available in this version.',
+    );
+    expect(markup).toMatch(
+      /aria-label="Fetch origin for codex-git"[^>]*disabled=""/u,
+    );
+  });
+
+  it('counts Worktree availability independently from status freshness', () => {
+    const fixture = createOverviewFixture('one-worktree');
+    const source = fixture.source.getSnapshot();
+    if (source.kind !== 'repository')
+      throw new Error('Expected Repository fixture');
+    fixture.publish({
+      kind: 'repository',
+      snapshot: {
+        ...source.snapshot,
+        worktrees: source.snapshot.worktrees.map((worktree) => ({
+          ...worktree,
+          availability: { kind: 'available' },
+          status: {
+            kind: 'unavailable',
+            reason: 'Status observation failed.',
+          },
+        })),
+      },
+    });
+
+    const markup = renderToStaticMarkup(
+      <App store={createRepositoryStore(fixture.source)} />,
+    );
+
+    expect(markup).toContain('<dt>Available</dt><dd>1</dd>');
+    expect(markup).toContain('<dt>Unavailable</dt><dd>0</dd>');
+  });
+
   it('clears a stale file selection when the selected Branch changes', () => {
     const fixture = createOverviewFixture('one-worktree');
     const store = createRepositoryStore(fixture.source);

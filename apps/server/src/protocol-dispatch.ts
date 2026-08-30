@@ -25,6 +25,7 @@ import {
   type CommitDraftUpdate,
   type CommandEnvelope,
   type RepositorySnapshot,
+  type RepositorySnapshotResult,
   type OperationReceipt,
   type OperationId,
   type OperationResult,
@@ -32,7 +33,7 @@ import {
   type NativeActionRequest,
   type NativeActionResult,
   type NativeTargetId,
-  repositorySnapshotSchema,
+  repositorySnapshotResultSchema,
   type SessionMetadata,
   type WorktreeId,
   type DiagnosticRedactor,
@@ -57,7 +58,7 @@ export interface ProtocolHandlers {
   ) => Awaitable<OperationResult>;
   readonly nativeActions?: NativeActionHandler;
   readonly diff?: (request: DiffRequest) => Awaitable<DiffResult>;
-  readonly snapshot?: () => Awaitable<RepositorySnapshot>;
+  readonly snapshot?: () => Awaitable<RepositorySnapshotResult>;
 }
 
 export interface ProtocolDispatchResponse {
@@ -163,11 +164,14 @@ export function createProtocolDispatcher(
     },
     async dispatch(endpoint, body) {
       if (endpoint === 'snapshot' && handlers.snapshot !== undefined) {
-        const snapshot = repositorySnapshotSchema.safeParse(
+        const snapshot = repositorySnapshotResultSchema.safeParse(
           await handlers.snapshot(),
         );
         if (!snapshot.success) return invalidHandlerResponse();
-        const nativeActions = collectNativeActions(snapshot.data);
+        const nativeActions =
+          snapshot.data.kind === 'repository'
+            ? collectNativeActions(snapshot.data)
+            : new Map<NativeTargetId, Set<NativeActionKind>>();
         if (nativeActions === undefined) return invalidHandlerResponse();
         issuedNativeActions = nativeActions;
         return { status: 200, value: snapshot.data };

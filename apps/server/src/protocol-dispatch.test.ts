@@ -32,19 +32,28 @@ afterEach(async () => {
 describe('protocol HTTP dispatch', () => {
   it('routes snapshots with redacted diagnostics without advertising absent handlers', async () => {
     const snapshot = repositorySnapshotSchema.parse({
+      kind: 'repository',
       repositoryId: 'repository_0123456789abcdef0123456789abcdef',
       repositoryRevision: 4,
       topologyRevision: 2,
       refsRevision: 3,
+      displayName: 'repository',
+      path: '/workspace/repository',
       refresh: {
         kind: 'stale',
         message: 'Authorization: Bearer fixture-snapshot-token',
       },
+      fetch: { kind: 'never' },
+      fetchAvailable: true,
       worktrees: [
         {
           worktreeId: 'worktree_0123456789abcdef0123456789abcdef',
           worktreeRevision: 1,
           generation: 'generation_0123456789abcdef0123456789abcdef',
+          role: 'main',
+          displayName: 'repository',
+          path: '/workspace/repository',
+          availability: { kind: 'available' },
           freshness: {
             kind: 'failed',
             message:
@@ -55,6 +64,10 @@ describe('protocol HTTP dispatch', () => {
           status: {
             kind: 'unavailable',
             reason: 'token=fixture-unavailable-secret',
+          },
+          upstream: {
+            kind: 'not-applicable',
+            reason: 'The branch has no configured Upstream.',
           },
           changes: Array.from({ length: 2_000 }, (_, index) => ({
             baseline: 'index_to_working_tree',
@@ -770,20 +783,33 @@ function nativeSnapshot(
   duplicate?: readonly string[],
 ): ReturnType<typeof repositorySnapshotSchema.parse> {
   return repositorySnapshotSchema.parse({
+    kind: 'repository',
     repositoryId: 'repository_99999999999999999999999999999999',
     repositoryRevision: 1,
     topologyRevision: 1,
     refsRevision: 1,
+    displayName: 'repository',
+    path: '/workspace/repository',
     refresh: { kind: 'current' },
+    fetch: { kind: 'never' },
+    fetchAvailable: true,
     worktrees: [
       {
         worktreeId: 'worktree_99999999999999999999999999999999',
         worktreeRevision: 1,
         generation: 'generation_99999999999999999999999999999999',
+        role: 'main',
+        displayName: 'repository',
+        path: '/workspace/repository',
+        availability: { kind: 'available' },
         freshness: { kind: 'current' },
         head: { kind: 'initial' },
         indexTree: null,
         status: { kind: 'clean' },
+        upstream: {
+          kind: 'not-applicable',
+          reason: 'The branch has no configured Upstream.',
+        },
         changes: [],
         nativeTargets: [
           { targetId, actions },
