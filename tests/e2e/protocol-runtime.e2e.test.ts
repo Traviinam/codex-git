@@ -10,6 +10,9 @@ import {
 } from '@codex-git/launcher';
 import {
   PROTOCOL_VERSION_HEADER,
+  branchSearchResultSchema,
+  operationReceiptSchema,
+  operationResultSchema,
   repositorySnapshotSchema,
 } from '@codex-git/protocol';
 
@@ -187,7 +190,87 @@ describe('protocol runtime composition', () => {
       status: 200,
     });
   });
+
+  it('searches and switches Branches through typed protocol endpoints', async () => {
+    const repository = await createRepositoryWithCommit();
+    await repository.git('branch', 'review-ready');
+    const runtime = await startStandaloneRuntime({
+      projectPath: repository.path,
+      surfacePort: 0,
+    });
+    runtimes.push(runtime);
+    const snapshot = repositorySnapshotSchema.parse(
+      await protocolRequest(runtime, 'snapshot'),
+    );
+    const worktree = snapshot.worktrees[0]!;
+    const branches = branchSearchResultSchema.parse(
+      await protocolRequest(runtime, 'branches', {
+        worktreeId: worktree.worktreeId,
+        query: 'review-ready',
+      }),
+    );
+    const target = branches.candidates[0]!;
+
+    const receipt = operationReceiptSchema.parse(
+      await protocolRequest(runtime, 'commands', {
+        clientCommandId: 'command_0123456789abcdef0123456789abcdef',
+        command: {
+          kind: 'switch_branch',
+          worktreeId: worktree.worktreeId,
+          expectedWorktreeRevision: worktree.worktreeRevision,
+          refId: target.refId,
+          expectedRefsRevision: branches.refsRevision,
+        },
+      }),
+    );
+    let result = operationResultSchema.parse(
+      await protocolRequest(runtime, 'operations', {
+        operationId: receipt.operationId,
+      }),
+    );
+    for (
+      let attempt = 0;
+      result.kind === 'unknown_outcome' && attempt < 5;
+      attempt += 1
+    ) {
+      result = operationResultSchema.parse(
+        await protocolRequest(runtime, 'operations', {
+          operationId: receipt.operationId,
+        }),
+      );
+    }
+
+    expect(result).toMatchObject({
+      kind: 'succeeded',
+      result: { kind: 'branch_switch', displayName: 'review-ready' },
+    });
+    expect(
+      (await repository.git('branch', '--show-current')).stdout.trim(),
+    ).toBe('review-ready');
+  });
 });
+
+async function protocolRequest(
+  runtime: StandaloneRuntime,
+  endpoint: 'branches' | 'commands' | 'operations' | 'snapshot',
+  body?: unknown,
+): Promise<unknown> {
+  const url = new URL(
+    runtime.sessionUrl.pathname.replace(/\/session$/u, `/${endpoint}`),
+    runtime.sessionUrl,
+  );
+  const response = await fetch(url, {
+    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: {
+      origin: runtime.surfaceUrl.origin,
+      [PROTOCOL_VERSION_HEADER]: '1',
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    method: body === undefined ? 'GET' : 'POST',
+  });
+  expect(response.status).toBe(200);
+  return response.json();
+}
 
 function protocolBootstrap(surface: string): unknown {
   const match = surface.match(

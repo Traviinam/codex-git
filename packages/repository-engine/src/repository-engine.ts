@@ -224,7 +224,7 @@ export function createRepositoryEngine(): RepositoryEngine {
         },
       });
       return createRefreshingRepositorySession(
-        createRepositorySession(publication),
+        createRepositorySession(publication, { runGit }),
       );
     },
   };

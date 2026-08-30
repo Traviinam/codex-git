@@ -7,6 +7,10 @@ const loadingStore = createRepositoryStore({
   subscribe: () => () => undefined,
   requestRefresh: () => undefined,
   requestFetch: () => undefined,
+  searchBranches: async () => ({ refsRevision: 0, candidates: [] }),
+  switchBranch: async () => {
+    throw new Error('Branch switching is unavailable while loading.');
+  },
 });
 
 export function App({
