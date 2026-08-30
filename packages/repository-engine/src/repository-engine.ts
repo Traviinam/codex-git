@@ -19,6 +19,7 @@ import {
 import { createGitEnvironment } from './git-environment.js';
 import { GitReadPolicy } from './git-read-policy.js';
 import { readChangedFileDiff } from './change-review.js';
+import { createFileMutationInspector } from './file-mutation-inspection.js';
 import { createRepositoryObserver } from './repository-observation.js';
 import {
   createRepositoryPublicationSession,
@@ -52,6 +53,7 @@ export interface RepositoryDiscovery {
 export interface DiscoveredWorktree {
   readonly worktreeId: WorktreeId;
   readonly generation: WorktreeGeneration;
+  readonly privateIdentityEvidence: string;
   readonly displayPath: string;
   readonly canonicalPath: AbsolutePath | null;
   readonly canonicalPathBytes: Uint8Array;
@@ -234,6 +236,7 @@ export function createRepositoryEngine(): RepositoryEngine {
             fetchRemote(resolved.selectedWorktreePath, remoteName, signal),
           diff: (worktree, fileId) =>
             readChangedFileDiff(worktree, fileId, runGit),
+          inspectFileMutationTargets: createFileMutationInspector(runGit),
           runGit,
         }),
       );
@@ -324,6 +327,7 @@ async function discoverRepository(
     return toDiscoveredWorktree(
       registration,
       worktreeIdentity,
+      `${identity.evidence}\0${worktreeIdentity.evidence}`,
       index === 0 ? 'main' : 'linked',
     );
   });
@@ -610,12 +614,14 @@ function rejectDuplicateAdminIdentities(
 function toDiscoveredWorktree(
   registration: CanonicalRegistration,
   identity: WorktreeIdentityState,
+  privateIdentityEvidence: string,
   role: 'main' | 'linked',
 ): DiscoveredWorktree {
   const { record } = registration;
   return {
     worktreeId: identity.worktreeId,
     generation: identity.generation,
+    privateIdentityEvidence,
     displayPath: decodeForDisplay(record.pathBytes),
     canonicalPath: registration.canonicalPath,
     canonicalPathBytes: registration.canonicalPathBytes.slice(),
@@ -718,9 +724,10 @@ function runGit(
   acceptedEmptyExitCode?: 1,
   signal?: AbortSignal,
   maximumOutputBytes?: number,
+  input?: Uint8Array,
 ): Promise<Uint8Array> {
   return new Promise((resolvePromise, reject) => {
-    execFile(
+    const child = execFile(
       'git',
       [...args],
       {
@@ -752,6 +759,7 @@ function runGit(
         resolvePromise(stdout);
       },
     );
+    if (input !== undefined) child.stdin?.end(input);
   });
 }
 

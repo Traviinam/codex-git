@@ -56,6 +56,48 @@ describe('Repository overview interactions', () => {
     expect(container.textContent).toContain('Unified');
   });
 
+  it('offers file and group Stage and Unstage actions', async () => {
+    const fixture = createOverviewFixture('changed-worktree');
+    const mutations: unknown[] = [];
+    const store = createRepositoryStore({
+      ...fixture.source,
+      async mutateFiles(request: unknown) {
+        mutations.push(request);
+        return {
+          kind: 'succeeded' as const,
+          operationId: operationIdSchema.parse(
+            'operation_00000000000000000000000000000002',
+          ),
+          result: { kind: 'files' as const, affectedCount: 2 },
+        };
+      },
+    });
+    act(() => root.render(<App store={store} />));
+
+    expect(button('Unstage README.md')).toBeDefined();
+    expect(button('Stage src/app.ts')).toBeDefined();
+    expect(button('Stage notes.txt')).toBeDefined();
+    expect(button('Unstage all Staged Changes')).toBeDefined();
+    expect(button('Stage all Changes')).toBeDefined();
+    expect(button('Stage all Untracked Files')).toBeDefined();
+
+    await act(async () => button('Stage all Changes').click());
+
+    const source = fixture.source.getSnapshot();
+    if (source.kind !== 'repository') throw new Error('Expected Repository');
+    const worktree = source.snapshot.worktrees[0]!;
+    expect(mutations).toEqual([
+      {
+        kind: 'stage',
+        worktreeId: worktree.worktreeId,
+        expectedWorktreeRevision: worktree.worktreeRevision,
+        fileIds: worktree.changes
+          .filter(({ kind }) => kind === 'change')
+          .map(({ fileId }) => fileId),
+      },
+    ]);
+  });
+
   it('shows truthful metadata when Diff content cannot be rendered', async () => {
     const fixture = createOverviewFixture('changed-worktree');
     const store = createRepositoryStore({

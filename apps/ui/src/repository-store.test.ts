@@ -1,3 +1,4 @@
+import { fileIdSchema, operationIdSchema } from '@codex-git/protocol';
 import { describe, expect, it, vi } from 'vitest';
 
 import { createOverviewFixture } from './overview-fixtures.js';
@@ -78,5 +79,58 @@ describe('RepositoryStore lifecycle', () => {
         initial.source.snapshot.repositoryRevision,
       );
     }
+  });
+
+  it('follows a successful file mutation into its new Change Group', async () => {
+    const fixture = createOverviewFixture('changed-worktree');
+    const before = fixture.source.getSnapshot();
+    if (before.kind !== 'repository') throw new Error('Expected Repository');
+    const worktree = before.snapshot.worktrees[0]!;
+    const changed = worktree.changes.find(({ kind }) => kind === 'change')!;
+    const stagedFileId = fileIdSchema.parse(
+      'file_0000000000000000000000000000000a',
+    );
+    const source: RepositoryOverviewSource = {
+      ...fixture.source,
+      async mutateFiles() {
+        fixture.publish({
+          kind: 'repository',
+          snapshot: {
+            ...before.snapshot,
+            repositoryRevision: before.snapshot.repositoryRevision + 1,
+            worktrees: [
+              {
+                ...worktree,
+                worktreeRevision: worktree.worktreeRevision + 1,
+                changes: worktree.changes.map((change) =>
+                  change.fileId === changed.fileId
+                    ? {
+                        ...change,
+                        fileId: stagedFileId,
+                        kind: 'staged_change' as const,
+                        baseline: 'head_to_index' as const,
+                      }
+                    : change,
+                ),
+              },
+            ],
+          },
+        });
+        return {
+          kind: 'succeeded',
+          operationId: operationIdSchema.parse(
+            'operation_00000000000000000000000000000003',
+          ),
+          result: { kind: 'files', affectedCount: 1 },
+        };
+      },
+    };
+    const store = createRepositoryStore(source);
+    store.selectFile(changed.fileId);
+
+    store.mutateFiles('stage', [changed.fileId]);
+    await Promise.resolve();
+
+    expect(store.getSnapshot().selectedFileId).toBe(stagedFileId);
   });
 });
