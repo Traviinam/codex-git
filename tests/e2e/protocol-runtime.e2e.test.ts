@@ -22,6 +22,7 @@ import {
 const runtimes: StandaloneRuntime[] = [];
 const repositories: TemporaryGitRepository[] = [];
 const temporaryDirectories: string[] = [];
+// Vite and loopback shutdown can exceed Vitest's default under shared CI load.
 const runtimeCleanupTimeoutMilliseconds = 30_000;
 
 afterEach(async () => {
