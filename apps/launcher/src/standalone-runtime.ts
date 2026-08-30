@@ -146,15 +146,52 @@ interface CloseableResource {
   close(): Promise<unknown>;
 }
 
+interface TraceableClientEnvironment extends CloseableResource {
+  readonly depsOptimizer?: CloseableResource;
+  readonly pluginContainer: CloseableResource;
+  readonly _pendingRequests: Map<
+    unknown,
+    { readonly request: Promise<unknown> }
+  >;
+}
+
 function traceSurfaceClosePhases(server: ViteDevServer): void {
   traceCloseMethod(server.watcher, 'surface:watcher');
   traceCloseMethod(server.ws, 'surface:websocket');
   for (const [name, environment] of Object.entries(server.environments)) {
-    traceCloseMethod(environment, `surface:environment:${name}`);
+    if (name === 'client') {
+      traceClientEnvironmentClose(
+        environment as unknown as TraceableClientEnvironment,
+      );
+    } else {
+      traceCloseMethod(environment, `surface:environment:${name}`);
+    }
   }
   server.httpServer?.once('close', () => {
     process.stderr.write('[DEBUG-close-runtime] surface:http:done\n');
   });
+}
+
+function traceClientEnvironmentClose(
+  environment: TraceableClientEnvironment,
+): void {
+  traceCloseMethod(
+    environment.pluginContainer,
+    'surface:environment:client:plugins',
+  );
+  if (environment.depsOptimizer !== undefined) {
+    traceCloseMethod(
+      environment.depsOptimizer,
+      'surface:environment:client:deps',
+    );
+  }
+  const close = environment.close.bind(environment);
+  environment.close = async () => {
+    process.stderr.write(
+      `[DEBUG-close-runtime] surface:environment:client:pending:${environment._pendingRequests.size}\n`,
+    );
+    await traceClose('surface:environment:client', close);
+  };
 }
 
 function traceCloseMethod(target: CloseableResource, label: string): void {
