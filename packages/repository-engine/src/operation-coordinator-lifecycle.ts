@@ -124,9 +124,9 @@ class LifecycleAdapter<
           if (record.reconciling === promise) record.reconciling = undefined;
           return this.settle(record, result);
         },
-        (error: unknown) => {
+        () => {
           if (record.reconciling === promise) record.reconciling = undefined;
-          throw error;
+          return this.settle(record, reconciliationIncomplete(record.id));
         },
       );
     record.reconciling = promise;
@@ -156,7 +156,7 @@ class LifecycleAdapter<
   }
 
   async #finishClose(reconcile: (record: Record) => Promise<OperationResult>) {
-    const result = await this.#store.close({
+    return this.#store.close({
       drain: (record) => {
         if (record.result?.kind === 'unknown_outcome') {
           return this.reconcile(record, () => reconcile(record));
@@ -164,16 +164,18 @@ class LifecycleAdapter<
         this.#requestCancellation(record);
         return record.settled;
       },
+      finalize: (result) => {
+        if (result.kind !== 'timed_out') return;
+        for (const operationId of result.pendingOperationIds) {
+          const record = this.#store.get(operationId);
+          if (record === undefined) continue;
+          const cancellationAlreadyRequested = record.cancellationRequested;
+          record.timedOut = true;
+          this.#requestCancellation(record);
+          if (cancellationAlreadyRequested) this.#store.publish(record);
+        }
+      },
     });
-    if (result.kind === 'timed_out') {
-      for (const operationId of result.pendingOperationIds) {
-        const record = this.#store.get(operationId);
-        if (record === undefined) continue;
-        record.timedOut = true;
-        this.#requestCancellation(record);
-      }
-    }
-    return result;
   }
 
   settle(record: Record, result: OperationResult) {
@@ -217,4 +219,14 @@ function deferred<Value>() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+function reconciliationIncomplete(operationId: OperationId): OperationResult {
+  return {
+    kind: 'unknown_outcome',
+    operationId,
+    code: 'reconciliation_incomplete',
+    message: 'Reconciliation could not establish the operation outcome.',
+    recoveryAvailable: true,
+  };
 }

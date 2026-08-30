@@ -124,6 +124,65 @@ describe('coordinator lifecycle adapter', () => {
     expect(unknown.reconciling).toBeUndefined();
   });
 
+  it('settles reconciliation rejection as a sanitized Unknown outcome', async () => {
+    const observed: TestSummary[] = [];
+    const lifecycle = createLifecycle({
+      publish: (summary) => observed.push(summary),
+    });
+    const active = activeRecord('1', 'active');
+    expect(lifecycle.activate(active)).toBe('running');
+
+    const reconciliation = lifecycle.reconcile(active, async () => {
+      throw new Error('sensitive process stderr and host path');
+    });
+
+    await expect(reconciliation).resolves.toEqual({
+      kind: 'unknown_outcome',
+      operationId: active.id,
+      code: 'reconciliation_incomplete',
+      message: 'Reconciliation could not establish the operation outcome.',
+      recoveryAvailable: true,
+    });
+    await expect(active.settled).resolves.toBe(active.result);
+    expect(active.phase).toBe('terminal');
+    expect(active.lease).toBe(true);
+    expect(active.reconciling).toBeUndefined();
+    expect(observed.at(-1)).toMatchObject({
+      phase: 'terminal',
+      resultKind: 'unknown_outcome',
+    });
+  });
+
+  it('closes a rejected recovery as terminal Unknown, not reconciling', async () => {
+    const observed: TestSummary[] = [];
+    const lifecycle = createLifecycle({
+      publish: (summary) => observed.push(summary),
+    });
+    const unknown = activeRecord('1', 'unknown');
+    expect(lifecycle.addTerminal(unknown)).toBe(true);
+    lifecycle.settle(unknown, unknownOutcome(unknown.id));
+
+    const close = lifecycle.close(async () => {
+      throw new Error('recovery transport failed');
+    });
+
+    await expect(close).resolves.toEqual({ kind: 'drained' });
+    expect(unknown.phase).toBe('terminal');
+    expect(unknown.result).toEqual({
+      kind: 'unknown_outcome',
+      operationId: unknown.id,
+      code: 'reconciliation_incomplete',
+      message: 'Reconciliation could not establish the operation outcome.',
+      recoveryAvailable: true,
+    });
+    expect(unknown.lease).toBe(true);
+    expect(unknown.reconciling).toBeUndefined();
+    expect(observed.at(-1)).toMatchObject({
+      phase: 'terminal',
+      resultKind: 'unknown_outcome',
+    });
+  });
+
   it('drains live, reconciling, and Unknown records but skips known terminals', async () => {
     const timeout = controlledTimeout();
     const lifecycle = createLifecycle({
@@ -164,8 +223,10 @@ describe('coordinator lifecycle adapter', () => {
 
   it('marks only pending records when bounded close times out', async () => {
     const timeout = controlledTimeout();
+    const observed: TestSummary[] = [];
     const lifecycle = createLifecycle({
       closeTimeoutMilliseconds: 250,
+      publish: (summary) => observed.push(summary),
       timeoutScheduler: timeout.scheduler,
     });
     const completed = activeRecord('1', 'completed');
@@ -187,6 +248,11 @@ describe('coordinator lifecycle adapter', () => {
     expect(completed.timedOut).toBe(false);
     expect(pending.timedOut).toBe(true);
     expect(pending.cancellationRequested).toBe(true);
+    expect(observed.at(-1)).toMatchObject({
+      cancellationRequested: true,
+      label: 'pending',
+      timedOut: true,
+    });
     lifecycle.settle(pending, success(pending.id));
     expect(lifecycle.get(pending.id).result).toMatchObject({
       kind: 'succeeded',
