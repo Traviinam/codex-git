@@ -53,12 +53,12 @@ export async function startStandaloneRuntime(
 
   async function closeResources(): Promise<void> {
     await Promise.all([
-      hostConnection?.close(),
-      repositorySession?.close(),
-      surfaceServer?.close(),
-      protocolServer?.close(),
+      traceClose('host', () => hostConnection?.close()),
+      traceClose('repository', () => repositorySession?.close()),
+      traceClose('surface', () => surfaceServer?.close()),
+      traceClose('protocol', () => protocolServer?.close()),
     ]);
-    await invalidationPump;
+    await traceClose('invalidation-pump', () => invalidationPump);
   }
 
   try {
@@ -139,6 +139,15 @@ export async function startStandaloneRuntime(
     await closeResources();
     throw error;
   }
+}
+
+async function traceClose(
+  label: string,
+  close: () => Promise<unknown> | undefined,
+): Promise<void> {
+  process.stderr.write(`[DEBUG-close-runtime] ${label}:start\n`);
+  await close();
+  process.stderr.write(`[DEBUG-close-runtime] ${label}:done\n`);
 }
 
 async function performFileNativeAction(
