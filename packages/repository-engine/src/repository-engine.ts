@@ -230,6 +230,7 @@ export function createRepositoryEngine(): RepositoryEngine {
         createRepositorySession(publication, {
           diff: (worktree, fileId) =>
             readChangedFileDiff(worktree, fileId, runGit),
+          runGit,
         }),
       );
     },

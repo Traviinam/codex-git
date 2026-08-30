@@ -3,6 +3,9 @@ import type {
   FileId,
   NativeActionRequest,
   NativeActionResult,
+  BranchSearchResult,
+  OperationResult,
+  RefId,
   RepositorySnapshot,
 } from '@codex-git/protocol';
 
@@ -101,4 +104,14 @@ export interface RepositoryOverviewSource {
   requestNativeAction(
     request: NativeActionRequest,
   ): Promise<NativeActionResult>;
+  searchBranches(
+    worktreeId: ProtocolWorktree['worktreeId'],
+    query: string,
+  ): Promise<BranchSearchResult>;
+  switchBranch(request: {
+    readonly worktreeId: ProtocolWorktree['worktreeId'];
+    readonly expectedWorktreeRevision: number;
+    readonly expectedRefsRevision: number;
+    readonly refId: RefId;
+  }): Promise<OperationResult>;
 }

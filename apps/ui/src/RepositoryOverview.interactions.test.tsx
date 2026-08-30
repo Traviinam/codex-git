@@ -3,6 +3,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { operationIdSchema, refIdSchema } from '@codex-git/protocol';
 
 import { App } from './overview.js';
 import { createOverviewFixture } from './overview-fixtures.js';
@@ -464,6 +465,134 @@ describe('Repository overview interactions', () => {
     });
 
     expect(document.activeElement).toBe(draft);
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      'Branch or HEAD changed',
+    );
+  });
+
+  it('separates Branch groups, disables occupied Local Branches, and navigates to their Worktree', async () => {
+    const fixture = createOverviewFixture('many-worktrees');
+    const fixtureState = fixture.source.getSnapshot();
+    const occupiedWorktree =
+      fixtureState.kind === 'repository'
+        ? fixtureState.snapshot.worktrees.find(
+            ({ displayName }) => displayName === 'agent-alpha',
+          )
+        : undefined;
+    if (occupiedWorktree === undefined) throw new Error('Missing Worktree');
+    const source = {
+      ...fixture.source,
+      async searchBranches() {
+        return {
+          refsRevision: 2,
+          candidates: [
+            {
+              refId: refIdSchema.parse('ref_0123456789abcdef0123456789abcdef'),
+              kind: 'local' as const,
+              displayName: 'available',
+              occupiedBy: null,
+            },
+            {
+              refId: refIdSchema.parse('ref_1123456789abcdef0123456789abcdef'),
+              kind: 'local' as const,
+              displayName: 'feat/agent-alpha',
+              occupiedBy: occupiedWorktree.worktreeId,
+            },
+            {
+              refId: refIdSchema.parse('ref_2123456789abcdef0123456789abcdef'),
+              kind: 'remote_tracking' as const,
+              displayName: 'origin/review-ready',
+              occupiedBy: null,
+            },
+          ],
+        };
+      },
+    };
+    const store = createRepositoryStore(source);
+    act(() => root.render(<App store={store} />));
+
+    await act(async () => button('Switch Branch for codex-git').click());
+
+    expect(container.textContent).toContain('Local Branches');
+    expect(container.textContent).toContain('Remote-tracking Branches');
+    expect(button('Switch codex-git to feat/agent-alpha').disabled).toBe(true);
+    act(() => button('Go to Worktree occupying feat/agent-alpha').click());
+    expect(container.querySelector('#worktree-title')?.textContent).toBe(
+      'agent-alpha',
+    );
+  });
+
+  it('submits an exact Branch target and clears the picker after reconciled success', async () => {
+    const fixture = createOverviewFixture('one-worktree');
+    const targetRefId = refIdSchema.parse(
+      'ref_3123456789abcdef0123456789abcdef',
+    );
+    const switchBranch = vi.fn(async () => {
+      const current = fixture.source.getSnapshot();
+      if (current.kind !== 'repository') throw new Error('Expected Repository');
+      fixture.publish({
+        kind: 'repository',
+        snapshot: {
+          ...current.snapshot,
+          repositoryRevision: current.snapshot.repositoryRevision + 1,
+          refsRevision: current.snapshot.refsRevision + 1,
+          worktrees: current.snapshot.worktrees.map((worktree) => ({
+            ...worktree,
+            worktreeRevision: worktree.worktreeRevision + 1,
+            head: {
+              kind: 'local_branch' as const,
+              displayName: 'review-ready',
+              objectId: '1123456789abcdef0123456789abcdef01234567',
+            },
+          })),
+        },
+      });
+      return {
+        kind: 'succeeded' as const,
+        operationId: operationIdSchema.parse(
+          'operation_0123456789abcdef0123456789abcdef',
+        ),
+        result: {
+          kind: 'branch_switch' as const,
+          displayName: 'review-ready',
+        },
+      };
+    });
+    const source = {
+      ...fixture.source,
+      async searchBranches() {
+        return {
+          refsRevision: 1,
+          candidates: [
+            {
+              refId: targetRefId,
+              kind: 'local' as const,
+              displayName: 'review-ready',
+              occupiedBy: null,
+            },
+          ],
+        };
+      },
+      switchBranch,
+    };
+    const store = createRepositoryStore(source);
+    act(() => root.render(<App store={store} />));
+    await act(async () => button('Switch Branch for codex-git').click());
+
+    await act(async () => button('Switch codex-git to review-ready').click());
+
+    expect(switchBranch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedRefsRevision: 1,
+        expectedWorktreeRevision: 1,
+        refId: targetRefId,
+      }),
+    );
+    expect(container.querySelector('#worktree-title')?.textContent).toBe(
+      'codex-git',
+    );
+    expect(container.textContent).toContain('Local Branch review-ready');
+    expect(container.textContent).not.toContain('Search cached Branches');
     expect(container.querySelector('[role="status"]')?.textContent).toContain(
       'Branch or HEAD changed',
     );

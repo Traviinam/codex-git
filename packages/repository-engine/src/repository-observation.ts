@@ -45,6 +45,7 @@ export interface IndexSnapshot {
 export interface WorktreeStatusSummary {
   readonly clean: boolean;
   readonly conflicted: number;
+  readonly inProgressOperation?: InProgressGitOperation;
   readonly staged: number;
   readonly unstaged: number;
   readonly untracked: number;
@@ -68,6 +69,9 @@ interface ChangedFileObservationBase<
   readonly previousPathBytes: Uint8Array | null;
   readonly workingFilePresent: boolean;
 }
+
+export type InProgressGitOperation =
+  'bisect' | 'cherry-pick' | 'merge' | 'rebase' | 'revert';
 
 export type UpstreamSnapshot =
   | {
@@ -304,24 +308,43 @@ async function observeWorktree(
       readKeyPrefix,
       signal,
     );
-    const indexPathOutput = await runRead(
-      reads,
-      readGit,
-      [
-        '-C',
-        worktree.canonicalPath,
-        'rev-parse',
-        '--path-format=absolute',
-        '--git-path',
-        'index',
-      ],
-      false,
-      undefined,
-      readKeyPrefix,
-      signal,
-    );
+    const [indexPathOutput, operationPathsOutput] = await Promise.all([
+      runRead(
+        reads,
+        readGit,
+        [
+          '-C',
+          worktree.canonicalPath,
+          'rev-parse',
+          '--path-format=absolute',
+          '--git-path',
+          'index',
+        ],
+        false,
+        undefined,
+        readKeyPrefix,
+        signal,
+      ),
+      runRead(
+        reads,
+        readGit,
+        [
+          '-C',
+          worktree.canonicalPath,
+          'rev-parse',
+          '--path-format=absolute',
+          ...inProgressMarkers.flatMap(({ path }) => ['--git-path', path]),
+        ],
+        false,
+        undefined,
+        readKeyPrefix,
+        signal,
+      ),
+    ]);
     const observed = summarizeStatus(statusOutput, worktree.head);
     const indexPath = decodeLine(indexPathOutput);
+    const inProgressOperation =
+      await detectInProgressOperation(operationPathsOutput);
     return {
       kind: 'fresh',
       worktreeId: worktree.worktreeId,
@@ -332,7 +355,13 @@ async function observeWorktree(
         fingerprint: fingerprintBytes(indexOutput),
         locked: await pathExists(`${indexPath}.lock`),
       },
-      status: observed.status,
+      status:
+        inProgressOperation === null
+          ? observed.status
+          : {
+              ...observed.status,
+              inProgressOperation,
+            },
       changes: observed.changes,
       upstream: resolveUpstream(observed.upstream, shared),
     };
@@ -343,6 +372,35 @@ async function observeWorktree(
       error: classifyWorktreeError(error),
     };
   }
+}
+
+const inProgressMarkers = [
+  { path: 'rebase-merge', operation: 'rebase' },
+  { path: 'rebase-apply', operation: 'rebase' },
+  { path: 'MERGE_HEAD', operation: 'merge' },
+  { path: 'CHERRY_PICK_HEAD', operation: 'cherry-pick' },
+  { path: 'REVERT_HEAD', operation: 'revert' },
+  { path: 'BISECT_LOG', operation: 'bisect' },
+] as const;
+
+async function detectInProgressOperation(
+  pathsOutput: Uint8Array,
+): Promise<InProgressGitOperation | null> {
+  const paths = decode(pathsOutput)
+    .replace(/\r?\n$/u, '')
+    .split(/\r?\n/u);
+  for (let index = 0; index < inProgressMarkers.length; index += 1) {
+    const marker = inProgressMarkers[index];
+    const path = paths[index];
+    if (
+      marker !== undefined &&
+      path !== undefined &&
+      (await pathExists(path))
+    ) {
+      return marker.operation;
+    }
+  }
+  return null;
 }
 
 async function readCoherentWorktree(

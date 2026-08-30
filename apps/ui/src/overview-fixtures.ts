@@ -103,6 +103,12 @@ function createMutableFixture(
           message: 'Native actions are not installed in this fixture.',
         };
       },
+      async searchBranches() {
+        return { refsRevision: 0, candidates: [] };
+      },
+      async switchBranch() {
+        throw new Error('Branch switching is not configured for this fixture.');
+      },
     },
     publish(nextState) {
       state = nextState;

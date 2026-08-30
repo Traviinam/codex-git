@@ -165,6 +165,12 @@ function worktreeStatus(source: PublishedWorktreeSnapshot) {
           : 'The Worktree status is unavailable.',
     };
   }
+  if (source.status.inProgressOperation !== undefined) {
+    return {
+      kind: 'in_progress' as const,
+      operation: source.status.inProgressOperation,
+    };
+  }
   if (source.status.clean) return { kind: 'clean' as const };
   return {
     kind: 'changed' as const,

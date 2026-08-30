@@ -133,6 +133,27 @@ describe('Repository observation Git recipes', () => {
         ],
         false,
       ),
+      recipe(
+        [
+          '-C',
+          path,
+          'rev-parse',
+          '--path-format=absolute',
+          '--git-path',
+          'rebase-merge',
+          '--git-path',
+          'rebase-apply',
+          '--git-path',
+          'MERGE_HEAD',
+          '--git-path',
+          'CHERRY_PICK_HEAD',
+          '--git-path',
+          'REVERT_HEAD',
+          '--git-path',
+          'BISECT_LOG',
+        ],
+        false,
+      ),
       ...sharedRecipes,
     ]);
     expect(observation.shared.remotes[0]).toMatchObject({

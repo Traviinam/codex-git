@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { PROTOCOL_VERSION, PROTOCOL_VERSION_HEADER } from '@codex-git/protocol';
+import {
+  PROTOCOL_VERSION,
+  PROTOCOL_VERSION_HEADER,
+  worktreeIdSchema,
+} from '@codex-git/protocol';
 
 import { createProtocolRepositorySource } from './protocol-repository-source.js';
 
@@ -238,6 +242,60 @@ describe('ProtocolRepositorySource', () => {
       );
     });
   });
+
+  it('searches cached Branches and waits for an authoritative switch result', async () => {
+    const requests: string[] = [];
+    const source = createProtocolRepositorySource({
+      projectPath: '/projects/codex-git',
+      sessionUrl: 'http://127.0.0.1:4173/instance/fixture-token/v1/session',
+      createEventSource: () => new FakeEventSource(),
+      fetch: async (input) => {
+        const url = String(input);
+        requests.push(url.split('/').at(-1) ?? '');
+        if (url.endsWith('/session')) {
+          return jsonResponse({
+            ...sessionMetadata,
+            capabilities: {
+              ...sessionMetadata.capabilities,
+              branchSearch: true,
+              commands: true,
+              operationRecovery: true,
+            },
+          });
+        }
+        if (url.endsWith('/branches')) return jsonResponse(branchSearchResult);
+        if (url.endsWith('/commands')) return jsonResponse(operationReceipt);
+        if (url.endsWith('/operations')) return jsonResponse(operationResult);
+        return jsonResponse(repositorySnapshot);
+      },
+    });
+    await until(() => source.getSnapshot().kind === 'repository');
+
+    const branches = await source.searchBranches(
+      worktreeIdSchema.parse(repositorySnapshot.worktrees[0]!.worktreeId),
+      'review',
+    );
+    const result = await source.switchBranch({
+      worktreeId: worktreeIdSchema.parse(
+        repositorySnapshot.worktrees[0]!.worktreeId,
+      ),
+      expectedWorktreeRevision:
+        repositorySnapshot.worktrees[0]!.worktreeRevision,
+      expectedRefsRevision: branches.refsRevision,
+      refId: branches.candidates[0]!.refId,
+    });
+
+    expect(branches).toEqual(branchSearchResult);
+    expect(result).toEqual(operationResult);
+    expect(requests).toEqual([
+      'session',
+      'snapshot',
+      'branches',
+      'commands',
+      'operations',
+      'snapshot',
+    ]);
+  });
 });
 
 class FakeEventSource {
@@ -313,6 +371,30 @@ const repositorySnapshot = {
   ],
   remotes: [],
   operations: [],
+};
+
+const branchSearchResult = {
+  refsRevision: 1,
+  candidates: [
+    {
+      refId: 'ref_0123456789abcdef0123456789abcdef',
+      kind: 'local',
+      displayName: 'review-ready',
+      occupiedBy: null,
+    },
+  ],
+};
+
+const operationReceipt = {
+  operationId: 'operation_0123456789abcdef0123456789abcdef',
+  clientCommandId: 'command_0123456789abcdef0123456789abcdef',
+  disposition: 'accepted',
+};
+
+const operationResult = {
+  kind: 'succeeded',
+  operationId: operationReceipt.operationId,
+  result: { kind: 'branch_switch', displayName: 'review-ready' },
 };
 
 function jsonResponse(value: unknown): Response {

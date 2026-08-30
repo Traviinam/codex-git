@@ -13,6 +13,10 @@ const loadingStore = createRepositoryStore({
       kind: 'unavailable',
       message: 'No Repository is loaded.',
     }),
+  searchBranches: async () => ({ refsRevision: 0, candidates: [] }),
+  switchBranch: async () => {
+    throw new Error('Branch switching is unavailable while loading.');
+  },
 });
 
 export function App({

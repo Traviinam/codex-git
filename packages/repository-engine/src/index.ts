@@ -9,6 +9,7 @@ export {
 } from './repository-engine.js';
 export {
   type ChangedFileObservation,
+  type InProgressGitOperation,
   type IndexSnapshot,
   type RefSnapshot,
   type UpstreamSnapshot,

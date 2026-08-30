@@ -80,6 +80,11 @@ export async function startStandaloneRuntime(
               diff: ({ fileId }) => repositorySession!.diff(fileId),
               nativeActions: (request) =>
                 performFileNativeAction(repositorySession!, request),
+              branchSearch: (request) =>
+                repositorySession!.searchBranches(request),
+              commands: (request) => repositorySession!.dispatch(request),
+              operationRecovery: (operationId) =>
+                repositorySession!.recoverOperation(operationId),
               snapshot: async () =>
                 toProtocolRepositorySnapshot(
                   await repositorySession!.requestRefresh(),
