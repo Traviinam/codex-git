@@ -1,10 +1,14 @@
 import {
   PROTOCOL_VERSION,
   PROTOCOL_VERSION_HEADER,
+  branchSearchResultSchema,
+  operationReceiptSchema,
+  operationResultSchema,
   repositorySnapshotResultSchema,
   sessionMetadataSchema,
   sseInvalidationSchema,
 } from '@codex-git/protocol';
+import type { BranchSearchRequest, ProductCommand } from '@codex-git/protocol';
 
 import type {
   RepositoryOverviewSource,
@@ -130,6 +134,38 @@ export function createProtocolRepositorySource(
     requestFetch() {
       // Fetch is enabled by Issue #13. The overview remains truthful until then.
     },
+    async searchBranches(worktreeId, query) {
+      const response = await protocolPost(
+        fetcher,
+        endpointUrl(options.sessionUrl, 'branches'),
+        { worktreeId, query } satisfies BranchSearchRequest,
+      );
+      if (!response.ok) throw new Error('Branch search failed.');
+      return branchSearchResultSchema.parse(await response.json());
+    },
+    async switchBranch(request) {
+      const clientCommandId = createClientCommandId();
+      const command = {
+        kind: 'switch_branch',
+        ...request,
+      } satisfies ProductCommand;
+      const submitted = await protocolPost(
+        fetcher,
+        endpointUrl(options.sessionUrl, 'commands'),
+        { clientCommandId, command },
+      );
+      if (!submitted.ok) throw new Error('Branch switch submission failed.');
+      const receipt = operationReceiptSchema.parse(await submitted.json());
+      const recovery = await protocolPost(
+        fetcher,
+        endpointUrl(options.sessionUrl, 'operations'),
+        { operationId: receipt.operationId },
+      );
+      if (!recovery.ok) throw new Error('Branch switch recovery failed.');
+      const result = operationResultSchema.parse(await recovery.json());
+      await requestSnapshot();
+      return result;
+    },
   };
 }
 
@@ -182,6 +218,27 @@ function protocolFetch(fetcher: typeof fetch, url: string) {
   });
 }
 
-function endpointUrl(sessionUrl: string, endpoint: 'events' | 'snapshot') {
+function protocolPost(fetcher: typeof fetch, url: string, body: unknown) {
+  return fetcher(url, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      [PROTOCOL_VERSION_HEADER]: String(PROTOCOL_VERSION),
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+function endpointUrl(
+  sessionUrl: string,
+  endpoint: 'branches' | 'commands' | 'events' | 'operations' | 'snapshot',
+) {
   return sessionUrl.replace(/\/session$/u, `/${endpoint}`);
+}
+
+function createClientCommandId() {
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  return `command_${Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('')}` as const;
 }

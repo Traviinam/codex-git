@@ -67,6 +67,11 @@ export async function startStandaloneRuntime(
         repositorySession === undefined || options.projectPath === undefined
           ? undefined
           : {
+              branchSearch: (request) =>
+                repositorySession!.searchBranches(request),
+              commands: (request) => repositorySession!.dispatch(request),
+              operationRecovery: (operationId) =>
+                repositorySession!.recoverOperation(operationId),
               snapshot: async () =>
                 toProtocolRepositorySnapshot(
                   await repositorySession!.requestRefresh(),

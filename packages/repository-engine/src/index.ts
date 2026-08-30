@@ -8,6 +8,7 @@ export {
   type WorktreeAvailability,
 } from './repository-engine.js';
 export {
+  type InProgressGitOperation,
   type IndexSnapshot,
   type RefSnapshot,
   type UpstreamSnapshot,

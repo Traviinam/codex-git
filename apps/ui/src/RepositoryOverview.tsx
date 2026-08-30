@@ -16,6 +16,7 @@ export function RepositoryOverview({
     store.getSnapshot,
     store.getSnapshot,
   );
+  const branchPicker = state.branchPicker;
   const worktreeButtons = useRef(new Map<string, HTMLButtonElement>());
   const searchInput = useRef<HTMLInputElement>(null);
   const worktreeTitle = useRef<HTMLHeadingElement>(null);
@@ -321,7 +322,8 @@ export function RepositoryOverview({
               <button
                 aria-label={`Switch Branch for ${selected.displayName}`}
                 type="button"
-                disabled
+                disabled={!branchSwitchAllowed(selected, snapshot.operations)}
+                onClick={() => store.openBranchPicker()}
               >
                 Switch Branch
               </button>
@@ -333,6 +335,109 @@ export function RepositoryOverview({
                 Upstream actions
               </button>
             </div>
+            {branchPicker.kind === 'closed' ? null : (
+              <section aria-label={`Switch Branch for ${selected.displayName}`}>
+                <h3>Switch Branch</h3>
+                <label>
+                  Search cached Branches
+                  <input
+                    type="search"
+                    value={branchPicker.query}
+                    onChange={(event) =>
+                      store.setBranchQuery(event.currentTarget.value)
+                    }
+                  />
+                </label>
+                <button type="button" onClick={() => store.closeBranchPicker()}>
+                  Close
+                </button>
+                {branchPicker.kind === 'loading' ? (
+                  <p role="status">Loading cached Branches…</p>
+                ) : branchPicker.kind === 'failed' ? (
+                  <p role="alert">{branchPicker.message}</p>
+                ) : (
+                  <>
+                    {branchPicker.message === null ? null : (
+                      <p role="alert">{branchPicker.message}</p>
+                    )}
+                    {(['local', 'remote_tracking'] as const).map((kind) => {
+                      const branches = branchPicker.candidates.filter(
+                        (candidate) => candidate.kind === kind,
+                      );
+                      return (
+                        <section key={kind}>
+                          <h4>
+                            {kind === 'local'
+                              ? 'Local Branches'
+                              : 'Remote-tracking Branches'}
+                          </h4>
+                          {branches.length === 0 ? (
+                            <p>No matching Branches.</p>
+                          ) : (
+                            <ul>
+                              {branches.map((branch) => {
+                                const occupiedElsewhere =
+                                  branch.occupiedBy !== null &&
+                                  branch.occupiedBy !== selected.worktreeId;
+                                const occupyingWorktree =
+                                  branch.occupiedBy === null
+                                    ? undefined
+                                    : snapshot.worktrees.find(
+                                        ({ worktreeId }) =>
+                                          worktreeId === branch.occupiedBy,
+                                      );
+                                return (
+                                  <li key={branch.refId}>
+                                    <button
+                                      aria-label={`Switch ${selected.displayName} to ${branch.displayName}`}
+                                      disabled={
+                                        occupiedElsewhere ||
+                                        branchPicker.switchingRefId !== null
+                                      }
+                                      type="button"
+                                      onClick={() =>
+                                        store.switchBranch(branch.refId)
+                                      }
+                                    >
+                                      {branch.displayName}
+                                    </button>
+                                    {branch.warning == null ? null : (
+                                      <span role="note">{branch.warning}</span>
+                                    )}
+                                    {!occupiedElsewhere ? null : (
+                                      <>
+                                        <span>
+                                          Occupied by{' '}
+                                          {occupyingWorktree?.displayName ??
+                                            'another Worktree'}
+                                        </span>
+                                        <button
+                                          aria-label={`Go to Worktree occupying ${branch.displayName}`}
+                                          type="button"
+                                          onClick={() => {
+                                            if (branch.occupiedBy !== null) {
+                                              store.selectWorktree(
+                                                branch.occupiedBy,
+                                              );
+                                            }
+                                          }}
+                                        >
+                                          Go to Worktree
+                                        </button>
+                                      </>
+                                    )}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          )}
+                        </section>
+                      );
+                    })}
+                  </>
+                )}
+              </section>
+            )}
             <label>
               Commit Draft for {selected.displayName}
               <textarea
@@ -357,6 +462,22 @@ export function RepositoryOverview({
         )}
       </div>
     </main>
+  );
+}
+
+function branchSwitchAllowed(
+  worktree: WorktreeOverviewSnapshot,
+  operations: RepositoryOverviewSnapshot['operations'],
+): boolean {
+  return (
+    (worktree.availability === undefined ||
+      worktree.availability.kind === 'available') &&
+    worktree.freshness.kind === 'current' &&
+    worktree.status.kind === 'clean' &&
+    !operations.some(
+      ({ category, phase }) =>
+        category === 'branch_switch' && phase !== 'terminal',
+    )
   );
 }
 

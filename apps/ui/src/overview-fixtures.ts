@@ -74,6 +74,12 @@ function createMutableFixture(
       requestFetch(remoteId) {
         fetch.push(remoteId);
       },
+      async searchBranches() {
+        return { refsRevision: 0, candidates: [] };
+      },
+      async switchBranch() {
+        throw new Error('Branch switching is not configured for this fixture.');
+      },
     },
     publish(nextState) {
       state = nextState;
