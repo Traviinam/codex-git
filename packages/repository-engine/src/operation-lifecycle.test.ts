@@ -175,9 +175,20 @@ describe('operation lifecycle store', () => {
     expect(store.add(completed)).toBe(true);
     expect(store.add(pending)).toBe(true);
 
+    const finalized: TestSummary[] = [];
     const close = store.close({
       drain: (record) =>
         record.id === completed.id ? Promise.resolve() : never.promise,
+      finalize: (closeResult) => {
+        expect(closeResult).toEqual({
+          kind: 'timed_out',
+          pendingOperationIds: [pending.id],
+        });
+        pending.label = 'timed out';
+        expect(store.publish(pending)).toBe(true);
+        finalized.push({ label: pending.label });
+        throw new Error('Finalization failure');
+      },
     });
     let result: Awaited<typeof close> | undefined;
     void close.then((value) => {
@@ -194,6 +205,7 @@ describe('operation lifecycle store', () => {
     });
     expect(store.open).toBe(false);
     expect(store.records()).toEqual([completed, pending]);
+    expect(finalized).toEqual([{ label: 'timed out' }]);
   });
 
   it('rejects invalid capacity and duplicate live identities', () => {

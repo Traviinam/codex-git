@@ -31,6 +31,7 @@ export type LifecycleCloseResult =
 
 export interface LifecycleCloseHooks<Record extends ManagedOperationRecord> {
   drain(record: Record): Promise<unknown>;
+  finalize?(result: LifecycleCloseResult): void;
 }
 
 export interface OperationLifecycleStoreOptions<
@@ -169,25 +170,35 @@ class LifecycleStore<
     const tracked = this.records()
       .filter(needsDrain)
       .map((record) => trackDrain(record, hooks));
-    void this.#finishClose(tracked).then(done.resolve);
+    void this.#finishClose(tracked, hooks).then(done.resolve);
     return this.#closePromise;
   }
 
-  async #finishClose(tracked: readonly TrackedDrain<Record>[]) {
+  async #finishClose(
+    tracked: readonly TrackedDrain<Record>[],
+    hooks: LifecycleCloseHooks<Record>,
+  ) {
     const completed = await waitBounded(
       Promise.all(tracked.map(({ settled }) => settled)),
       this.#closeTimeout,
       this.#timeoutScheduler,
     );
+    const result: LifecycleCloseResult = completed
+      ? { kind: 'drained' }
+      : {
+          kind: 'timed_out',
+          pendingOperationIds: tracked
+            .filter(({ complete }) => !complete)
+            .map(({ operation }) => operation.id),
+        };
+    try {
+      hooks.finalize?.(result);
+    } catch {
+      // Finalization cannot prevent the store from closing.
+    }
     this.#state = 'closed';
     this.#publicationQueue.length = 0;
-    if (completed) return { kind: 'drained' } as const;
-    return {
-      kind: 'timed_out',
-      pendingOperationIds: tracked
-        .filter(({ complete }) => !complete)
-        .map(({ operation }) => operation.id),
-    } as const;
+    return result;
   }
 
   #isClosed() {
