@@ -53,12 +53,12 @@ export async function startStandaloneRuntime(
 
   async function closeResources(): Promise<void> {
     await Promise.all([
-      traceClose('host', () => hostConnection?.close()),
-      traceClose('repository', () => repositorySession?.close()),
+      hostConnection?.close(),
+      repositorySession?.close(),
       traceClose('surface', () => surfaceServer?.close()),
-      traceClose('protocol', () => protocolServer?.close()),
+      protocolServer?.close(),
     ]);
-    await traceClose('invalidation-pump', () => invalidationPump);
+    await invalidationPump;
   }
 
   try {
@@ -111,6 +111,7 @@ export async function startStandaloneRuntime(
       },
     });
     await surfaceServer.listen();
+    traceSurfaceClosePhases(surfaceServer);
 
     const surfaceUrl = serverUrl(surfaceServer.httpServer, '/');
     protocolServer.allowOrigin(surfaceUrl.origin);
@@ -139,6 +140,28 @@ export async function startStandaloneRuntime(
     await closeResources();
     throw error;
   }
+}
+
+interface CloseableResource {
+  close(): Promise<unknown>;
+}
+
+function traceSurfaceClosePhases(server: ViteDevServer): void {
+  traceCloseMethod(server.watcher, 'surface:watcher');
+  traceCloseMethod(server.ws, 'surface:websocket');
+  for (const [name, environment] of Object.entries(server.environments)) {
+    traceCloseMethod(environment, `surface:environment:${name}`);
+  }
+  server.httpServer?.once('close', () => {
+    process.stderr.write('[DEBUG-close-runtime] surface:http:done\n');
+  });
+}
+
+function traceCloseMethod(target: CloseableResource, label: string): void {
+  const close = target.close.bind(target);
+  target.close = async () => {
+    await traceClose(label, close);
+  };
 }
 
 async function traceClose(
