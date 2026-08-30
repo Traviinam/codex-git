@@ -17,6 +17,9 @@ const loadingStore = createRepositoryStore({
   switchBranch: async () => {
     throw new Error('Branch switching is unavailable while loading.');
   },
+  requestRemoteOperation: async () => {
+    throw new Error('Remote operations are unavailable while loading.');
+  },
 });
 
 export function App({

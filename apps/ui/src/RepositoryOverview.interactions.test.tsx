@@ -25,6 +25,92 @@ describe('Repository overview interactions', () => {
     container.remove();
   });
 
+  it('confirms the exact Remote and same-name target before Publish', async () => {
+    const fixture = createOverviewFixture('one-worktree');
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository') throw new Error('Expected Repository');
+    fixture.publish({
+      kind: 'repository',
+      snapshot: {
+        ...current.snapshot,
+        worktrees: current.snapshot.worktrees.map((worktree) => ({
+          ...worktree,
+          upstream: {
+            kind: 'unpublished' as const,
+            remoteName: null,
+            fetchedAt: null,
+          },
+        })),
+      },
+    });
+    const requestRemoteOperation = vi.fn(async () => ({
+      kind: 'succeeded' as const,
+      operationId: operationIdSchema.parse(
+        'operation_00000000000000000000000000000002',
+      ),
+      result: {
+        kind: 'remote' as const,
+        summary: 'Published main to origin.',
+      },
+    }));
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true);
+    const store = createRepositoryStore({
+      ...fixture.source,
+      requestRemoteOperation,
+    });
+    act(() => root.render(<App store={store} />));
+
+    await act(async () => button('Publish main to origin/main').click());
+
+    expect(confirm).toHaveBeenCalledWith(
+      'Publish Local Branch main to exact target origin/main?',
+    );
+    expect(requestRemoteOperation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'publish',
+        remoteId: current.snapshot.remotes[0]!.remoteId,
+      }),
+    );
+    expect(container.textContent).toContain('Published main to origin.');
+  });
+
+  it('routes a diverged Upstream to the exact selected Worktree Terminal target', async () => {
+    const fixture = createOverviewFixture('one-worktree');
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository') throw new Error('Expected Repository');
+    fixture.publish({
+      kind: 'repository',
+      snapshot: {
+        ...current.snapshot,
+        worktrees: current.snapshot.worktrees.map((worktree) => ({
+          ...worktree,
+          upstream:
+            worktree.upstream.kind === 'tracking'
+              ? { ...worktree.upstream, ahead: 1, behind: 1 }
+              : worktree.upstream,
+        })),
+      },
+    });
+    const requestNativeAction = vi.fn(async () => ({
+      kind: 'performed' as const,
+    }));
+    const store = createRepositoryStore({
+      ...fixture.source,
+      requestNativeAction,
+    });
+    act(() => root.render(<App store={store} />));
+
+    expect(container.textContent).toContain(
+      'Open the exact selected Worktree in Terminal to Merge or Rebase explicitly.',
+    );
+    await act(async () => button('Open codex-git in Terminal').click());
+
+    expect(requestNativeAction).toHaveBeenCalledWith({
+      kind: 'open_terminal',
+      targetId: 'native_00000000000000000000000000000010',
+    });
+  });
+
   it('reviews Changed Files by group and navigates the current Worktree', async () => {
     const fixture = createOverviewFixture('changed-worktree');
     const store = createRepositoryStore(fixture.source);

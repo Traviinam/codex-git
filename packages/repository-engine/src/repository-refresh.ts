@@ -214,6 +214,8 @@ export function createRefreshingRepositorySession(
     diff: (fileId) => delegate.diff(fileId),
     resolveFileNativeTarget: (targetId) =>
       delegate.resolveFileNativeTarget(targetId),
+    resolveWorktreeNativeTarget: (targetId) =>
+      delegate.resolveWorktreeNativeTarget(targetId),
     searchBranches: (request) => delegate.searchBranches(request),
     dispatch,
     cancelOperation: (operationId) => delegate.cancelOperation(operationId),

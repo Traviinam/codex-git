@@ -5,6 +5,7 @@ import type {
   NativeActionRequest,
   NativeActionResult,
   RefId,
+  RemoteId,
   WorktreeId,
 } from '@codex-git/protocol';
 
@@ -35,6 +36,18 @@ export type BranchPickerState =
       readonly message: string;
     };
 
+export type RemoteOperationState =
+  | { readonly kind: 'idle' }
+  | {
+      readonly kind: 'running';
+      readonly operation: 'pull' | 'push' | 'publish';
+    }
+  | {
+      readonly kind: 'result';
+      readonly result: import('@codex-git/protocol').OperationResult;
+    }
+  | { readonly kind: 'failed'; readonly message: string };
+
 import type {
   RepositoryOverviewSnapshot,
   RepositoryOverviewSource,
@@ -52,6 +65,7 @@ export interface RepositoryStoreSnapshot {
   readonly selectionNotice: string | null;
   readonly focusRecoveryRevision: number;
   readonly branchPicker: BranchPickerState;
+  readonly remoteOperation: RemoteOperationState;
 }
 
 export interface RepositoryStore {
@@ -74,6 +88,9 @@ export interface RepositoryStore {
   closeBranchPicker(): void;
   setBranchQuery(query: string): void;
   switchBranch(refId: RefId): void;
+  pull(): void;
+  push(): void;
+  publish(remoteId: RemoteId): void;
 }
 
 export function createRepositoryStore(
@@ -94,6 +111,7 @@ export function createRepositoryStore(
   let focusRecoveryRevision = 0;
   let branchPicker: BranchPickerState = { kind: 'closed' };
   let branchRequestGeneration = 0;
+  let remoteOperation: RemoteOperationState = { kind: 'idle' };
   let storeSnapshot = buildSnapshot();
   let disposed = false;
 
@@ -312,7 +330,60 @@ export function createRepositoryStore(
           emit();
         });
     },
+    pull() {
+      void runRemoteOperation('pull');
+    },
+    push() {
+      void runRemoteOperation('push');
+    },
+    publish(remoteId) {
+      void runRemoteOperation('publish', remoteId);
+    },
   };
+
+  async function runRemoteOperation(
+    kind: 'pull' | 'push' | 'publish',
+    remoteId?: RemoteId,
+  ) {
+    if (
+      disposed ||
+      remoteOperation.kind === 'running' ||
+      sourceState.kind !== 'repository' ||
+      selectedWorktreeId === null
+    ) {
+      return;
+    }
+    const worktree = sourceState.snapshot.worktrees.find(
+      (candidate) => candidate.worktreeId === selectedWorktreeId,
+    );
+    if (
+      worktree === undefined ||
+      (kind === 'publish' && remoteId === undefined)
+    ) {
+      return;
+    }
+    remoteOperation = { kind: 'running', operation: kind };
+    emit();
+    try {
+      const result = await source.requestRemoteOperation({
+        kind,
+        worktreeId: worktree.worktreeId,
+        expectedWorktreeRevision: worktree.worktreeRevision,
+        expectedRefsRevision: sourceState.snapshot.refsRevision,
+        remoteId,
+      });
+      if (disposed) return;
+      remoteOperation = { kind: 'result', result };
+      emit();
+    } catch {
+      if (disposed) return;
+      remoteOperation = {
+        kind: 'failed',
+        message: 'The Remote operation could not be submitted.',
+      };
+      emit();
+    }
+  }
 
   async function loadBranches(query: string) {
     const worktreeId = selectedWorktreeId;
@@ -365,6 +436,7 @@ export function createRepositoryStore(
       selectionNotice,
       focusRecoveryRevision,
       branchPicker,
+      remoteOperation,
     };
   }
 
