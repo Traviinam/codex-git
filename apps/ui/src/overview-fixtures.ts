@@ -1,4 +1,6 @@
 import {
+  fileIdSchema,
+  nativeTargetIdSchema,
   operationIdSchema,
   remoteIdSchema,
   repositoryIdSchema,
@@ -18,12 +20,14 @@ export interface OverviewFixture {
   readonly requests: {
     readonly refresh: number;
     readonly fetch: readonly (string | null)[];
+    readonly diff: readonly string[];
   };
 }
 
 export function createOverviewFixture(
   name:
     | 'loading'
+    | 'changed-worktree'
     | 'many-worktrees'
     | 'non-repository'
     | 'one-worktree'
@@ -45,11 +49,13 @@ export function createOverviewFixture(
   return createMutableFixture({
     kind: 'repository',
     snapshot:
-      name === 'one-worktree'
-        ? oneWorktree
-        : name === 'many-worktrees'
-          ? manyWorktrees
-          : unavailableWorktree,
+      name === 'changed-worktree'
+        ? changedWorktree
+        : name === 'one-worktree'
+          ? oneWorktree
+          : name === 'many-worktrees'
+            ? manyWorktrees
+            : unavailableWorktree,
   });
 }
 
@@ -59,6 +65,7 @@ function createMutableFixture(
   let state = initial;
   let refresh = 0;
   const fetch: (string | null)[] = [];
+  const diff: string[] = [];
   const listeners = new Set<() => void>();
 
   return {
@@ -74,6 +81,28 @@ function createMutableFixture(
       requestFetch(remoteId) {
         fetch.push(remoteId);
       },
+      async requestDiff(fileId) {
+        diff.push(fileId);
+        return {
+          kind: 'text',
+          fileId,
+          baseline:
+            changedWorktree.worktrees[0]!.changes.find(
+              (change) => change.fileId === fileId,
+            )?.baseline ?? 'index_to_working_tree',
+          content:
+            fileId === changedFileIds[0]
+              ? '@@ -1 +1,2 @@\n old line\n+new staged line\n'
+              : '@@ -1 +1 @@\n-old value\n+new value\n',
+          lineCount: 3,
+        };
+      },
+      async requestNativeAction() {
+        return {
+          kind: 'unavailable',
+          message: 'Native actions are not installed in this fixture.',
+        };
+      },
       async searchBranches() {
         return { refsRevision: 0, candidates: [] };
       },
@@ -86,7 +115,7 @@ function createMutableFixture(
       listeners.forEach((listener) => listener());
     },
     get requests() {
-      return { refresh, fetch };
+      return { refresh, fetch, diff };
     },
   };
 }
@@ -105,6 +134,12 @@ const originId = remoteIdSchema.parse(
 );
 const backupRemoteId = remoteIdSchema.parse(
   'remote_00000000000000000000000000000002',
+);
+const changedFileIds = [1, 2, 3, 4].map((index) =>
+  fileIdSchema.parse(`file_${index.toString(16).padStart(32, '0')}`),
+);
+const changedNativeTargetIds = [1, 2, 3, 4].map((index) =>
+  nativeTargetIdSchema.parse(`native_${index.toString(16).padStart(32, '0')}`),
 );
 
 export const oneWorktree: RepositoryOverviewSnapshot = {
@@ -133,6 +168,7 @@ export const oneWorktree: RepositoryOverviewSnapshot = {
         objectId: '0123456789abcdef0123456789abcdef01234567',
       },
       status: { kind: 'clean' },
+      changes: [],
       upstream: {
         kind: 'tracking',
         displayName: 'origin/main',
@@ -143,6 +179,65 @@ export const oneWorktree: RepositoryOverviewSnapshot = {
     },
   ],
 };
+
+export const changedWorktree: RepositoryOverviewSnapshot = {
+  ...oneWorktree,
+  repositoryRevision: 2,
+  worktrees: [
+    {
+      ...oneWorktree.worktrees[0]!,
+      worktreeRevision: 2,
+      status: {
+        kind: 'changed',
+        conflictCount: 0,
+        stagedCount: 1,
+        trackedChangeCount: 2,
+        untrackedCount: 1,
+      },
+      changes: [
+        {
+          fileId: changedFileIds[0]!,
+          kind: 'staged_change',
+          baseline: 'head_to_index',
+          displayPath: 'README.md',
+          previousDisplayPath: null,
+          nativeTargets: [nativeFileTarget(0)],
+        },
+        {
+          fileId: changedFileIds[1]!,
+          kind: 'change',
+          baseline: 'index_to_working_tree',
+          displayPath: 'src/app.ts',
+          previousDisplayPath: null,
+          nativeTargets: [nativeFileTarget(1)],
+        },
+        {
+          fileId: changedFileIds[2]!,
+          kind: 'change',
+          baseline: 'index_to_working_tree',
+          displayPath: 'src/utils.ts',
+          previousDisplayPath: null,
+          nativeTargets: [nativeFileTarget(2)],
+        },
+        {
+          fileId: changedFileIds[3]!,
+          kind: 'untracked',
+          baseline: 'empty_to_working_tree',
+          displayPath: 'notes.txt',
+          previousDisplayPath: null,
+          nativeTargets: [nativeFileTarget(3)],
+        },
+      ],
+    },
+  ],
+};
+
+function nativeFileTarget(index: number) {
+  return {
+    targetId: changedNativeTargetIds[index]!,
+    actions: ['open_default_app', 'copy_relative_path'] as const,
+  };
+}
 
 const linkedWorktrees: RepositoryOverviewSnapshot['worktrees'] = Array.from(
   { length: 24 },
@@ -182,6 +277,7 @@ const linkedWorktrees: RepositoryOverviewSnapshot['worktrees'] = Array.from(
               untrackedCount: 1,
             }
           : { kind: 'clean' as const },
+      changes: [],
       upstream: {
         kind: 'tracking' as const,
         displayName: `origin/feat/${displayName}`,

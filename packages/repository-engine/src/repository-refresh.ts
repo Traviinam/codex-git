@@ -210,6 +210,9 @@ export function createRefreshingRepositorySession(
       return requestedRefresh;
     },
     subscribe: () => delegate.subscribe(),
+    diff: (fileId) => delegate.diff(fileId),
+    resolveFileNativeTarget: (targetId) =>
+      delegate.resolveFileNativeTarget(targetId),
     searchBranches: (request) => delegate.searchBranches(request),
     dispatch,
     cancelOperation: (operationId) => delegate.cancelOperation(operationId),

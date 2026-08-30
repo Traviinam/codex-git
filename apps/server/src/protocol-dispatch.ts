@@ -183,10 +183,15 @@ export function createProtocolDispatcher(
         if (!request.ok) {
           return { status: 400, value: { error: request.error } };
         }
-        return diffResponse(
-          request.value.fileId,
-          await handlers.diff(request.value),
-        );
+        try {
+          return diffResponse(
+            request.value.fileId,
+            await handlers.diff(request.value),
+          );
+        } catch (error) {
+          if (isStaleTargetError(error)) return staleDiffTargetResponse();
+          throw error;
+        }
       }
       if (endpoint === 'branches' && handlers.branchSearch !== undefined) {
         const input = parseJsonBody(body);
@@ -363,6 +368,24 @@ function staleNativeTargetResponse(): ProtocolDispatchResponse {
       },
     },
   };
+}
+
+function staleDiffTargetResponse(): ProtocolDispatchResponse {
+  return {
+    status: 409,
+    value: {
+      error: {
+        code: 'stale_target',
+        message: 'The Changed File target is stale or unavailable.',
+      },
+    },
+  };
+}
+
+function isStaleTargetError(error: unknown): boolean {
+  return (
+    error instanceof Error && 'code' in error && error.code === 'stale_target'
+  );
 }
 
 function operationRecoveryResponse(

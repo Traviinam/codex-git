@@ -1,6 +1,8 @@
 import {
   PROTOCOL_VERSION,
   PROTOCOL_VERSION_HEADER,
+  diffResultSchema,
+  nativeActionResultSchema,
   branchSearchResultSchema,
   operationReceiptSchema,
   operationResultSchema,
@@ -134,6 +136,32 @@ export function createProtocolRepositorySource(
     requestFetch() {
       // Fetch is enabled by Issue #13. The overview remains truthful until then.
     },
+    async requestDiff(fileId) {
+      const response = await protocolFetch(
+        fetcher,
+        endpointUrl(options.sessionUrl, 'diff'),
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ fileId }),
+        },
+      );
+      if (!response.ok) throw new Error('Diff request failed.');
+      return diffResultSchema.parse(await response.json());
+    },
+    async requestNativeAction(request) {
+      const response = await protocolFetch(
+        fetcher,
+        endpointUrl(options.sessionUrl, 'native-actions'),
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(request),
+        },
+      );
+      if (!response.ok) throw new Error('Native action request failed.');
+      return nativeActionResultSchema.parse(await response.json());
+    },
     async searchBranches(worktreeId, query) {
       const response = await protocolPost(
         fetcher,
@@ -212,9 +240,17 @@ async function fetchSnapshot(fetcher: typeof fetch, sessionUrl: string) {
   return repositorySnapshotResultSchema.parse(await response.json());
 }
 
-function protocolFetch(fetcher: typeof fetch, url: string) {
+function protocolFetch(
+  fetcher: typeof fetch,
+  url: string,
+  init: RequestInit = {},
+) {
   return fetcher(url, {
-    headers: { [PROTOCOL_VERSION_HEADER]: String(PROTOCOL_VERSION) },
+    ...init,
+    headers: {
+      ...Object.fromEntries(new Headers(init.headers)),
+      [PROTOCOL_VERSION_HEADER]: String(PROTOCOL_VERSION),
+    },
   });
 }
 
@@ -231,7 +267,14 @@ function protocolPost(fetcher: typeof fetch, url: string, body: unknown) {
 
 function endpointUrl(
   sessionUrl: string,
-  endpoint: 'branches' | 'commands' | 'events' | 'operations' | 'snapshot',
+  endpoint:
+    | 'branches'
+    | 'commands'
+    | 'diff'
+    | 'events'
+    | 'native-actions'
+    | 'operations'
+    | 'snapshot',
 ) {
   return sessionUrl.replace(/\/session$/u, `/${endpoint}`);
 }

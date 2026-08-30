@@ -72,6 +72,7 @@ describe('protocol HTTP dispatch', () => {
           changes: Array.from({ length: 2_000 }, (_, index) => ({
             baseline: 'index_to_working_tree',
             displayPath: 'x'.repeat(4_096),
+            previousDisplayPath: null,
             fileId: `file_${index.toString(16).padStart(32, '0')}`,
             kind: 'change',
             nativeTargets: [],
@@ -185,6 +186,38 @@ describe('protocol HTTP dispatch', () => {
       status: 400,
     });
     expect(handleDiff).not.toHaveBeenCalled();
+  });
+
+  it('rejects a stale Changed File target without exposing handler details', async () => {
+    const server = await startLoopbackServer({
+      allowedOrigins: ['null'],
+      handlers: {
+        diff: async () => {
+          const error = new Error('private path /projects/secret.txt');
+          Object.assign(error, { code: 'stale_target' });
+          throw error;
+        },
+      },
+    });
+    servers.push(server);
+
+    const response = await fetch(endpointUrl(server, 'diff'), {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        fileId: 'file_0123456789abcdef0123456789abcdef',
+      }),
+    });
+
+    expect({ status: response.status, body: await response.json() }).toEqual({
+      status: 409,
+      body: {
+        error: {
+          code: 'stale_target',
+          message: 'The Changed File target is stale or unavailable.',
+        },
+      },
+    });
   });
 
   it('rejects malformed UTF-8 JSON bytes before calling a handler', async () => {

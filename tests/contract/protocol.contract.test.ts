@@ -127,6 +127,7 @@ describe('protocol runtime schemas', () => {
               kind: 'change',
               baseline: 'index_to_working_tree',
               displayPath: 'src/example.ts',
+              previousDisplayPath: null,
               nativeTargets: [
                 {
                   targetId: 'native_0123456789abcdef0123456789abcdef',
@@ -212,6 +213,7 @@ describe('protocol runtime schemas', () => {
       kind: 'untracked',
       baseline: 'head_to_index',
       displayPath: 'new-file.ts',
+      previousDisplayPath: null,
       nativeTargets: [],
     });
 

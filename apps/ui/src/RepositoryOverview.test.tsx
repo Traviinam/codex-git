@@ -190,9 +190,12 @@ describe('Repository overview', () => {
   });
 
   it('retains file selection when the selected Local Branch advances', () => {
-    const fixture = createOverviewFixture('one-worktree');
+    const fixture = createOverviewFixture('changed-worktree');
     const store = createRepositoryStore(fixture.source);
-    const fileId = fileIdSchema.parse('file_00000000000000000000000000000002');
+    const source = fixture.source.getSnapshot();
+    if (source.kind !== 'repository')
+      throw new Error('Expected Repository fixture');
+    const fileId = source.snapshot.worktrees[0]!.changes[1]!.fileId;
     store.selectFile(fileId);
     const state = fixture.source.getSnapshot();
     if (state.kind !== 'repository')

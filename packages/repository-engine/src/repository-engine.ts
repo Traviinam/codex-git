@@ -18,6 +18,7 @@ import {
 } from './worktree-porcelain.js';
 import { createGitEnvironment } from './git-environment.js';
 import { GitReadPolicy } from './git-read-policy.js';
+import { readChangedFileDiff } from './change-review.js';
 import { createRepositoryObserver } from './repository-observation.js';
 import {
   createRepositoryPublicationSession,
@@ -156,6 +157,8 @@ export function createRepositoryEngine(): RepositoryEngine {
       const reads = new GitReadPolicy(4);
       let observedDiscovery: RepositoryDiscovery | undefined;
       const publication = createRepositoryPublicationSession({
+        issueFileId: () => ids.issue('file'),
+        issueNativeTargetId: () => ids.issue('native'),
         async read(signal, refreshGeneration, requestedScope) {
           const sessionGeneration = beginSnapshot(state);
           const candidateIdentity: RepositoryIdentityState = {
@@ -224,7 +227,11 @@ export function createRepositoryEngine(): RepositoryEngine {
         },
       });
       return createRefreshingRepositorySession(
-        createRepositorySession(publication, { runGit }),
+        createRepositorySession(publication, {
+          diff: (worktree, fileId) =>
+            readChangedFileDiff(worktree, fileId, runGit),
+          runGit,
+        }),
       );
     },
   };
@@ -706,6 +713,7 @@ function runGit(
   allowLargeOutput: boolean,
   acceptedEmptyExitCode?: 1,
   signal?: AbortSignal,
+  maximumOutputBytes?: number,
 ): Promise<Uint8Array> {
   return new Promise((resolvePromise, reject) => {
     execFile(
@@ -714,7 +722,9 @@ function runGit(
       {
         encoding: 'buffer',
         env: createGitEnvironment(),
-        maxBuffer: allowLargeOutput ? GIT_OUTPUT_LIMIT_BYTES : 64 * 1_024,
+        maxBuffer:
+          maximumOutputBytes ??
+          (allowLargeOutput ? GIT_OUTPUT_LIMIT_BYTES : 64 * 1_024),
         signal,
         timeout: GIT_TIMEOUT_MILLISECONDS,
         windowsHide: true,
