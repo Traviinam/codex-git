@@ -13,6 +13,10 @@ const standaloneContext = {
 } satisfies HostContext;
 
 class StandaloneHostConnection implements HostConnection {
+  capabilities() {
+    return { openCodexContext: false, openFileInCodex: false } as const;
+  }
+
   currentContext(): HostContext {
     return standaloneContext;
   }

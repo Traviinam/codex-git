@@ -117,6 +117,11 @@ describe('protocol runtime schemas', () => {
           head: { kind: 'initial' },
           indexTree: null,
           status: { kind: 'clean' },
+          provenance: {
+            kind: 'codex_task',
+            title: 'Implement exact navigation',
+            status: 'active',
+          },
           upstream: {
             kind: 'not-applicable',
             reason: 'The branch has no configured Upstream.',
@@ -136,7 +141,17 @@ describe('protocol runtime schemas', () => {
               ],
             },
           ],
-          nativeTargets: [],
+          nativeTargets: [
+            {
+              targetId: 'native_1123456789abcdef0123456789abcdef',
+              actions: [
+                'open_terminal',
+                'reveal_in_finder',
+                'copy_absolute_path',
+                'copy_branch_or_sha',
+              ],
+            },
+          ],
         },
       ],
       remotes: [

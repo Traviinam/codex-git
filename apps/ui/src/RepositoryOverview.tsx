@@ -1,4 +1,9 @@
-import { useEffect, useRef, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+
+import type {
+  NativeActionRequest,
+  NativeActionResult,
+} from '@codex-git/protocol';
 
 import type {
   RepositoryOverviewSnapshot,
@@ -7,6 +12,11 @@ import type {
 import type { RepositoryStore } from './repository-store.js';
 import { ChangeGroups } from './ChangeGroups.js';
 import { DiffReview } from './DiffReview.js';
+import {
+  nativeActionLabel,
+  performPresentedNativeAction,
+  worktreeNativeActionLabel,
+} from './native-action-presentation.js';
 
 export function RepositoryOverview({
   store,
@@ -23,6 +33,10 @@ export function RepositoryOverview({
   const searchInput = useRef<HTMLInputElement>(null);
   const worktreeTitle = useRef<HTMLHeadingElement>(null);
   const handledFocusRecovery = useRef(0);
+  const [nativeActionStatus, setNativeActionStatus] = useState<{
+    readonly worktreeId: string;
+    readonly message: string;
+  } | null>(null);
   const orderedWorktrees =
     state.source.kind === 'repository'
       ? [...state.source.snapshot.worktrees].sort(compareWorktrees)
@@ -341,6 +355,10 @@ export function RepositoryOverview({
                 <dd>{statusLabel(selected.status)}</dd>
               </div>
               <div>
+                <dt>Provenance</dt>
+                <dd>{provenanceLabel(selected.provenance)}</dd>
+              </div>
+              <div>
                 <dt>Worktree observation</dt>
                 <dd>{refreshLabel(selected.freshness)}</dd>
               </div>
@@ -354,6 +372,31 @@ export function RepositoryOverview({
               )}
             </dl>
             <div>
+              {selected.nativeTargets.flatMap((target) =>
+                target.actions.map((kind) => (
+                  <button
+                    aria-label={worktreeNativeActionLabel(
+                      kind,
+                      selected.displayName,
+                    )}
+                    key={`${target.targetId}:${kind}`}
+                    type="button"
+                    onClick={() =>
+                      void performWorktreeNativeAction(
+                        { kind, targetId: target.targetId },
+                        store.requestNativeAction,
+                        (message) =>
+                          setNativeActionStatus({
+                            worktreeId: selected.worktreeId,
+                            message,
+                          }),
+                      )
+                    }
+                  >
+                    {nativeActionLabel(kind)}
+                  </button>
+                )),
+              )}
               <button
                 aria-label={`Switch Branch for ${selected.displayName}`}
                 type="button"
@@ -370,6 +413,11 @@ export function RepositoryOverview({
                 Upstream actions
               </button>
             </div>
+            {nativeActionStatus?.worktreeId !== selected.worktreeId ? null : (
+              <p aria-live="polite" role="status">
+                {nativeActionStatus.message}
+              </p>
+            )}
             {branchPicker.kind === 'closed' ? null : (
               <section aria-label={`Switch Branch for ${selected.displayName}`}>
                 <h3>Switch Branch</h3>
@@ -571,11 +619,41 @@ function matchesSearch(
     worktree.displayName,
     worktree.path,
     branch,
-    worktree.codexTitle ?? '',
+    worktree.provenance.kind === 'codex_task' ? worktree.provenance.title : '',
   ]
     .join('\n')
     .toLocaleLowerCase()
     .includes(normalizedQuery);
+}
+
+function provenanceLabel(
+  provenance: WorktreeOverviewSnapshot['provenance'],
+): string {
+  switch (provenance.kind) {
+    case 'codex_task':
+      return `Codex Task Worktree — ${provenance.title} (${provenance.status})`;
+    case 'scheduled':
+      return 'Scheduled Worktree';
+    case 'permanent':
+      return 'Permanent Worktree';
+    case 'external':
+      return 'External Worktree';
+    case 'unclassified':
+      return 'Unclassified Worktree';
+  }
+}
+
+async function performWorktreeNativeAction(
+  request: NativeActionRequest,
+  run: (request: NativeActionRequest) => Promise<NativeActionResult>,
+  publish: (message: string) => void,
+): Promise<void> {
+  return performPresentedNativeAction(request, run, publish, {
+    performed: () => 'Opened the exact Worktree target.',
+    copyFallback: (_current, text) => `Value: ${text}`,
+    copied: () => 'Copied the exact Worktree value.',
+    failed: 'The exact target is unavailable. Refresh and try again.',
+  });
 }
 
 function headLabel(head: WorktreeOverviewSnapshot['head']): string {

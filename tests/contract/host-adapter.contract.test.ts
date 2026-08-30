@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { StandaloneHostAdapter } from '@codex-git/host-adapter-standalone';
+import { isNativeHostAction } from '@codex-git/host-adapter';
 
 describe('HostAdapter contract', () => {
   it('attaches the standalone surface with a current typed Host Context', async () => {
@@ -19,7 +20,34 @@ describe('HostAdapter contract', () => {
       task: null,
       theme: 'system',
     });
+    expect(result.connection.capabilities()).toEqual({
+      openCodexContext: false,
+      openFileInCodex: false,
+    });
 
     await result.connection.close();
+  });
+});
+
+describe('Host native action contract', () => {
+  it('accepts only named actions with exact opaque targets', () => {
+    expect(
+      isNativeHostAction({
+        kind: 'open-file-in-codex',
+        targetId: 'native_0123456789abcdef0123456789abcdef',
+      }),
+    ).toBe(true);
+    expect(
+      isNativeHostAction({
+        kind: 'open-file-in-codex',
+        absolutePath: '/tmp/user-supplied.ts',
+      }),
+    ).toBe(false);
+    expect(
+      isNativeHostAction({
+        kind: 'run-host-command',
+        targetId: 'native_0123456789abcdef0123456789abcdef',
+      }),
+    ).toBe(false);
   });
 });

@@ -21,9 +21,47 @@ describe('Repository overview', () => {
     expect(markup).toContain('<dt>Upstream freshness</dt>');
     expect(markup).toContain('Cached from Fetch Aug 29, 2026, 2:03 PM');
     expect(markup).toContain('Clean');
+    expect(markup).toContain(
+      '<dt>Provenance</dt><dd>Unclassified Worktree</dd>',
+    );
+    expect(markup).toContain('Open codex-git in Terminal');
+    expect(markup).toContain('Reveal codex-git in Finder');
+    expect(markup).toContain('Copy Absolute Path for codex-git');
+    expect(markup).toContain('Copy Branch or SHA for codex-git');
     expect(markup).toContain('Refresh codex-git locally');
     expect(markup).toContain('Fetch origin for codex-git');
     expect(markup).not.toContain('Search Worktrees');
+  });
+
+  it.each([
+    [
+      { kind: 'codex_task', title: 'Exact task', status: 'active' } as const,
+      'Codex Task Worktree — Exact task (active)',
+    ],
+    [{ kind: 'scheduled' } as const, 'Scheduled Worktree'],
+    [{ kind: 'permanent' } as const, 'Permanent Worktree'],
+    [{ kind: 'external' } as const, 'External Worktree'],
+    [{ kind: 'unclassified' } as const, 'Unclassified Worktree'],
+  ])('uses the canonical provenance term for %s', (provenance, label) => {
+    const fixture = createOverviewFixture('one-worktree');
+    const source = fixture.source.getSnapshot();
+    if (source.kind !== 'repository') throw new Error('Expected Repository');
+    fixture.publish({
+      kind: 'repository',
+      snapshot: {
+        ...source.snapshot,
+        worktrees: source.snapshot.worktrees.map((worktree) => ({
+          ...worktree,
+          provenance,
+        })),
+      },
+    });
+
+    const markup = renderToStaticMarkup(
+      <App store={createRepositoryStore(fixture.source)} />,
+    );
+
+    expect(markup).toContain(`<dt>Provenance</dt><dd>${label}</dd>`);
   });
 
   it('keeps Main first and the remaining Worktrees stable when status changes', () => {

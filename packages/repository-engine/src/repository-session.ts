@@ -31,6 +31,7 @@ import type {
   RepositorySnapshot,
   ScopedRepositoryPublicationSession,
 } from './repository-publication.js';
+import type { WorktreeProvenance } from './worktree-provenance.js';
 
 const OPERATION_TIMEOUT_MILLISECONDS = 30_000;
 
@@ -38,6 +39,9 @@ export interface RepositorySession extends RepositoryPublicationSession {
   fetch(request: RepositoryFetchRequest): Promise<OperationSessionAdmission>;
   diff(fileId: FileId): Promise<DiffResult>;
   resolveFileNativeTarget(targetId: NativeTargetId): Promise<FileNativeTarget>;
+  resolveWorktreeNativeTarget(
+    targetId: NativeTargetId,
+  ): Promise<WorktreeNativeTarget>;
   searchBranches(request: BranchSearchRequest): Promise<BranchSearchResult>;
   dispatch(request: CommandEnvelope): Promise<OperationReceipt>;
   cancelOperation(operationId: OperationId): Promise<OperationResult>;
@@ -99,6 +103,15 @@ export interface FileNativeTarget {
   readonly absolutePath: string | null;
   readonly canOpen: boolean;
   readonly relativePath: string;
+  readonly provenance: WorktreeProvenance;
+  readonly worktreePath: string;
+}
+
+export interface WorktreeNativeTarget {
+  readonly absolutePath: string;
+  readonly branchOrSha: string;
+  readonly canLaunch: boolean;
+  readonly provenance: WorktreeProvenance;
   readonly worktreePath: string;
 }
 
@@ -520,6 +533,7 @@ export function createRepositorySession(
             absolutePath: null,
             canOpen: false,
             relativePath: escapedBytePath(change.pathBytes),
+            provenance: worktree.provenance,
             worktreePath: worktree.canonicalPath,
           };
         }
@@ -532,12 +546,35 @@ export function createRepositorySession(
             absolutePath,
             canOpen: change.workingFilePresent,
             relativePath,
+            provenance: worktree.provenance,
             worktreePath: worktree.canonicalPath,
           };
         }
         throw new RepositoryTargetFailure();
       }
       throw new RepositoryTargetFailure();
+    },
+    async resolveWorktreeNativeTarget(targetId) {
+      const result = await observe(() => delegate.requestRefresh());
+      if (result.kind !== 'repository') throw new RepositoryTargetFailure();
+      const worktree = result.repository.worktrees.find(
+        (candidate) => candidate.nativeTargetId === targetId,
+      );
+      if (worktree === undefined) throw new RepositoryTargetFailure();
+      const branchOrSha =
+        worktree.head.kind === 'local_branch'
+          ? worktree.head.displayName
+          : worktree.head.objectId;
+      const worktreePath = worktree.canonicalPath ?? worktree.displayPath;
+      return {
+        absolutePath: worktreePath,
+        branchOrSha,
+        canLaunch:
+          worktree.canonicalPath !== null &&
+          worktree.availability.kind === 'available',
+        provenance: worktree.provenance,
+        worktreePath,
+      };
     },
     async searchBranches(request) {
       const observed = await observe(() => delegate.requestRefresh());

@@ -9,6 +9,10 @@ import type {
 import type { WorktreeOverviewSnapshot } from './repository-overview-model.js';
 import type { DiffLoadState } from './repository-store.js';
 import { presentSideBySide } from './diff-presentation.js';
+import {
+  nativeActionLabel,
+  performPresentedNativeAction,
+} from './native-action-presentation.js';
 
 export function DiffReview({
   worktree,
@@ -96,15 +100,15 @@ export function DiffReview({
           target.actions
             .filter(
               (kind) =>
-                kind === 'open_default_app' || kind === 'copy_relative_path',
+                kind === 'open_default_app' ||
+                kind === 'open_file_in_codex' ||
+                kind === 'reveal_in_finder' ||
+                kind === 'copy_relative_path' ||
+                kind === 'copy_absolute_path',
             )
             .map((kind) => (
               <button
-                aria-label={
-                  kind === 'open_default_app'
-                    ? 'Open in Default App'
-                    : 'Copy Relative Path'
-                }
+                aria-label={nativeActionLabel(kind)}
                 key={`${target.targetId}:${kind}`}
                 type="button"
                 onClick={() =>
@@ -116,9 +120,7 @@ export function DiffReview({
                   )
                 }
               >
-                {kind === 'open_default_app'
-                  ? 'Open in Default App'
-                  : 'Copy Relative Path'}
+                {nativeActionLabel(kind)}
               </button>
             )),
         )}
@@ -135,25 +137,23 @@ async function performNativeAction(
   run: (request: NativeActionRequest) => Promise<NativeActionResult>,
   publish: (message: string) => void,
 ): Promise<void> {
-  try {
-    const result = await run(request);
-    if (result.kind === 'unavailable') {
-      publish(result.message);
-      return;
-    }
-    if (result.kind === 'performed') {
-      publish('Opened the current Changed File.');
-      return;
-    }
-    if (globalThis.navigator.clipboard === undefined) {
-      publish(`Relative path: ${result.text}`);
-      return;
-    }
-    await globalThis.navigator.clipboard.writeText(result.text);
-    publish('Copied the relative path.');
-  } catch {
-    publish('The file action could not be completed. Refresh and try again.');
-  }
+  return performPresentedNativeAction(request, run, publish, {
+    performed: (current) =>
+      current.kind === 'reveal_in_finder'
+        ? 'Revealed the current Changed File.'
+        : current.kind === 'open_file_in_codex'
+          ? 'Opened the current Changed File in Codex.'
+          : 'Opened the current Changed File.',
+    copyFallback: (current, text) =>
+      current.kind === 'copy_absolute_path'
+        ? `Absolute path: ${text}`
+        : `Relative path: ${text}`,
+    copied: (current) =>
+      current.kind === 'copy_absolute_path'
+        ? 'Copied the absolute path.'
+        : 'Copied the relative path.',
+    failed: 'The file action could not be completed. Refresh and try again.',
+  });
 }
 
 function DiffContent({

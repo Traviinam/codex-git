@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import type { HostConnection } from '@codex-git/host-adapter';
 import {
   createRepositoryEngine,
+  type CodexMetadataAdapter,
   type RepositorySession,
 } from '@codex-git/repository-engine';
 import type {
@@ -32,6 +33,8 @@ const uiConfigPath = fileURLToPath(
 );
 
 export interface StandaloneRuntimeOptions {
+  readonly metadata?: CodexMetadataAdapter;
+  readonly nativeHostConnection?: () => HostConnection | null;
   readonly projectPath?: string;
   readonly surfacePort?: number;
 }
@@ -65,9 +68,9 @@ export async function startStandaloneRuntime(
 
   try {
     if (options.projectPath !== undefined) {
-      repositorySession = await createRepositoryEngine().open(
-        options.projectPath as AbsolutePath,
-      );
+      repositorySession = await createRepositoryEngine({
+        metadata: options.metadata,
+      }).open(options.projectPath as AbsolutePath);
       const opened = await repositorySession.requestRefresh();
       if (opened.kind === 'repository') {
         openedRepositoryId = opened.repository.repositoryId;
@@ -81,14 +84,23 @@ export async function startStandaloneRuntime(
           : {
               diff: ({ fileId }) => repositorySession!.diff(fileId),
               nativeActions: (request) =>
-                performFileNativeAction(repositorySession!, request),
+                performNativeAction(
+                  repositorySession!,
+                  request,
+                  options.nativeHostConnection,
+                ),
               branchSearch: (request) =>
                 repositorySession!.searchBranches(request),
-              snapshot: async () =>
-                toProtocolRepositorySnapshot(
-                  await repositorySession!.requestRefresh(),
+              snapshot: async () => {
+                const result = await repositorySession!.requestRefresh();
+                return toProtocolRepositorySnapshot(
+                  result,
                   options.projectPath!,
-                ),
+                  await hostNavigationContext(
+                    options.nativeHostConnection?.() ?? null,
+                  ),
+                );
+              },
               commands: (request) =>
                 dispatchRepositoryCommand(repositorySession!, request),
               operationRecovery: (operationId) =>
@@ -184,26 +196,86 @@ async function dispatchRepositoryCommand(
   };
 }
 
-async function performFileNativeAction(
+async function performNativeAction(
   session: RepositorySession,
   request: NativeActionRequest,
+  nativeHostConnection?: () => HostConnection | null,
 ): Promise<NativeActionResult> {
   try {
-    const target = await session.resolveFileNativeTarget(request.targetId);
     if (request.kind === 'copy_relative_path') {
+      const target = await session.resolveFileNativeTarget(request.targetId);
       return { kind: 'copy_text', text: target.relativePath };
     }
-    if (request.kind !== 'open_default_app') {
-      return {
-        kind: 'unavailable',
-        message: 'This file action is not available yet.',
-      };
+    if (request.kind === 'copy_branch_or_sha') {
+      const target = await session.resolveWorktreeNativeTarget(
+        request.targetId,
+      );
+      return { kind: 'copy_text', text: target.branchOrSha };
     }
-    if (!target.canOpen || target.absolutePath === null) {
-      throw new Error('The file cannot be opened from this change state.');
+    if (request.kind === 'copy_absolute_path') {
+      const target = await resolvePathTarget(session, request.targetId);
+      return { kind: 'copy_text', text: target.absolutePath };
+    }
+    if (
+      request.kind === 'open_codex_context' ||
+      request.kind === 'open_file_in_codex'
+    ) {
+      const host = nativeHostConnection?.() ?? null;
+      if (host === null) throw new Error('The Codex host is unavailable.');
+      const capabilities = host.capabilities();
+      const target =
+        request.kind === 'open_codex_context'
+          ? await session.resolveWorktreeNativeTarget(request.targetId)
+          : await session.resolveFileNativeTarget(request.targetId);
+      if (
+        (request.kind === 'open_codex_context'
+          ? !capabilities.openCodexContext
+          : !capabilities.openFileInCodex) ||
+        !(await hostContextMatches(
+          host,
+          target.worktreePath,
+          target.provenance,
+        ))
+      ) {
+        throw new Error('The Codex host cannot prove the exact target.');
+      }
+      const hostResult = await host.perform({
+        kind:
+          request.kind === 'open_codex_context'
+            ? 'open-codex-context'
+            : 'open-file-in-codex',
+        targetId: request.targetId,
+      });
+      if (hostResult.status !== 'succeeded') {
+        throw new Error('The Codex host rejected the exact target.');
+      }
+      return { kind: 'performed' };
+    }
+    if (request.kind === 'open_terminal') {
+      const target = await session.resolveWorktreeNativeTarget(
+        request.targetId,
+      );
+      const path = await revalidateWorktreePath(target);
+      await execFileAsync('/usr/bin/open', ['-a', 'Terminal', '--', path], {
+        timeout: 10_000,
+        windowsHide: true,
+      });
+      return { kind: 'performed' };
+    }
+    const target = await resolvePathTarget(session, request.targetId);
+    if (!target.canLaunch) {
+      throw new Error('The target cannot be opened from its current state.');
+    }
+    if (target.kind === 'worktree') {
+      const path = await revalidateWorktreePath(target);
+      await execFileAsync('/usr/bin/open', ['-R', '--', path], {
+        timeout: 10_000,
+        windowsHide: true,
+      });
+      return { kind: 'performed' };
     }
     const metadata = await lstat(target.absolutePath);
-    if (metadata.isSymbolicLink()) {
+    if (request.kind === 'open_default_app' && metadata.isSymbolicLink()) {
       throw new Error('Symbolic links cannot be opened from change review.');
     }
     const [resolvedWorktree, resolvedFile] = await Promise.all([
@@ -221,17 +293,117 @@ async function performFileNativeAction(
     ) {
       throw new Error('The file resolves outside its Worktree.');
     }
-    await execFileAsync('/usr/bin/open', ['--', resolvedFile], {
-      timeout: 10_000,
-      windowsHide: true,
-    });
+    await execFileAsync(
+      '/usr/bin/open',
+      request.kind === 'reveal_in_finder'
+        ? ['-R', '--', target.absolutePath]
+        : ['--', resolvedFile],
+      {
+        timeout: 10_000,
+        windowsHide: true,
+      },
+    );
     return { kind: 'performed' };
   } catch {
     return {
       kind: 'unavailable',
-      message: 'The file is no longer available. Refresh and try again.',
+      message:
+        'The exact target is no longer available. Refresh or use a safe copy action.',
     };
   }
+}
+
+async function hostNavigationContext(host: HostConnection | null) {
+  if (host === null) {
+    return {
+      canonicalProjectPath: null,
+      openCodexContext: false,
+      openFileInCodex: false,
+      taskId: null,
+    } as const;
+  }
+  const context = host.currentContext();
+  return {
+    ...host.capabilities(),
+    canonicalProjectPath:
+      context.projectPath === null
+        ? null
+        : await realpath(context.projectPath).catch(() => null),
+    taskId: context.task?.id ?? null,
+  };
+}
+
+async function hostContextMatches(
+  host: HostConnection,
+  worktreePath: string,
+  provenance: import('@codex-git/repository-engine').WorktreeProvenance,
+): Promise<boolean> {
+  const before = host.currentContext();
+  const canonicalProjectPath =
+    before.projectPath === null
+      ? null
+      : await realpath(before.projectPath).catch(() => null);
+  const current = host.currentContext();
+  if (
+    current.projectPath !== before.projectPath ||
+    current.task?.id !== before.task?.id
+  ) {
+    return false;
+  }
+  return (
+    (provenance.kind === 'codex_task' &&
+      provenance.task.id === current.task?.id) ||
+    canonicalProjectPath === worktreePath
+  );
+}
+
+type ResolvedPathTarget =
+  | {
+      readonly kind: 'file';
+      readonly absolutePath: string;
+      readonly canLaunch: boolean;
+      readonly worktreePath: string;
+    }
+  | {
+      readonly kind: 'worktree';
+      readonly absolutePath: string;
+      readonly canLaunch: boolean;
+      readonly worktreePath: string;
+    };
+
+async function resolvePathTarget(
+  session: RepositorySession,
+  targetId: NativeActionRequest['targetId'],
+): Promise<ResolvedPathTarget> {
+  try {
+    const file = await session.resolveFileNativeTarget(targetId);
+    if (file.absolutePath === null) throw new Error('No file path.');
+    return {
+      kind: 'file',
+      absolutePath: file.absolutePath,
+      canLaunch: file.canOpen,
+      worktreePath: file.worktreePath,
+    };
+  } catch {
+    const worktree = await session.resolveWorktreeNativeTarget(targetId);
+    return {
+      kind: 'worktree',
+      absolutePath: worktree.absolutePath,
+      canLaunch: worktree.canLaunch,
+      worktreePath: worktree.worktreePath,
+    };
+  }
+}
+
+async function revalidateWorktreePath(
+  target: Pick<ResolvedPathTarget, 'canLaunch' | 'worktreePath'>,
+): Promise<string> {
+  if (!target.canLaunch) throw new Error('The Worktree is unavailable.');
+  const resolved = await realpath(target.worktreePath);
+  if (resolved !== target.worktreePath) {
+    throw new Error('The Worktree moved before navigation.');
+  }
+  return resolved;
 }
 
 async function forwardRepositoryInvalidations(

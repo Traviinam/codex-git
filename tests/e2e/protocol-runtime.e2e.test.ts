@@ -1,5 +1,12 @@
-import { mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import {
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -156,9 +163,88 @@ describe('protocol runtime composition', () => {
           freshness: { kind: 'current' },
           head: { kind: 'local_branch', displayName: branchName },
           status: { kind: 'clean' },
+          provenance: { kind: 'unclassified' },
           upstream: { kind: 'unpublished' },
         },
       ],
+    });
+  });
+
+  it('copies exact Worktree path and Branch from an opaque target', async () => {
+    const repository = await createRepositoryWithCommit();
+    const runtime = await startStandaloneRuntime({
+      projectPath: repository.path,
+      surfacePort: 0,
+    });
+    runtimes.push(runtime);
+    const snapshot = repositorySnapshotSchema.parse(
+      await (await protocolRequest(runtime, 'snapshot')).json(),
+    );
+    const worktree = snapshot.worktrees[0]!;
+    const target = worktree.nativeTargets[0]!;
+    const branchName = (
+      await repository.git('branch', '--show-current')
+    ).stdout.trim();
+
+    const [pathResponse, branchResponse] = await Promise.all([
+      protocolRequest(runtime, 'native-actions', {
+        kind: 'copy_absolute_path',
+        targetId: target.targetId,
+      }),
+      protocolRequest(runtime, 'native-actions', {
+        kind: 'copy_branch_or_sha',
+        targetId: target.targetId,
+      }),
+    ]);
+
+    expect(await pathResponse.json()).toEqual({
+      kind: 'copy_text',
+      text: await realpath(repository.path),
+    });
+    expect(await branchResponse.json()).toEqual({
+      kind: 'copy_text',
+      text: branchName,
+    });
+  });
+
+  it('rejects an opaque Worktree target after its generation disappears', async () => {
+    const repository = await createRepositoryWithCommit();
+    const linkedPath = join(
+      dirname(repository.path),
+      `${basename(repository.path)}-navigation-linked`,
+    );
+    temporaryDirectories.push(linkedPath);
+    await repository.git(
+      'worktree',
+      'add',
+      '--quiet',
+      '-b',
+      'navigation-linked',
+      linkedPath,
+    );
+    const runtime = await startStandaloneRuntime({
+      projectPath: repository.path,
+      surfacePort: 0,
+    });
+    runtimes.push(runtime);
+    const snapshot = repositorySnapshotSchema.parse(
+      await (await protocolRequest(runtime, 'snapshot')).json(),
+    );
+    const linked = snapshot.worktrees.find(({ role }) => role === 'linked');
+    if (linked?.nativeTargets[0] === undefined) {
+      throw new Error('Expected an exact Linked Worktree target.');
+    }
+    await repository.git('worktree', 'remove', '--force', linkedPath);
+
+    const response = await protocolRequest(runtime, 'native-actions', {
+      kind: 'copy_absolute_path',
+      targetId: linked.nativeTargets[0].targetId,
+    });
+
+    expect(await response.json()).toEqual({
+      kind: 'unavailable',
+      message:
+        'The exact target is no longer available. Refresh or use a safe copy action.',
     });
   });
 
@@ -379,7 +465,10 @@ describe('protocol runtime composition', () => {
       ({ displayPath }) => displayPath === 'outside-link',
     );
 
-    expect(deletion?.nativeTargets[0]?.actions).toEqual(['copy_relative_path']);
+    expect(deletion?.nativeTargets[0]?.actions).toEqual([
+      'copy_relative_path',
+      'copy_absolute_path',
+    ]);
     expect(link?.nativeTargets[0]?.actions).toContain('open_default_app');
     if (link?.nativeTargets[0] === undefined) {
       throw new Error('The symbolic-link target is absent.');
@@ -404,6 +493,56 @@ describe('protocol runtime composition', () => {
     );
 
     expect(await actionResponse.json()).toMatchObject({ kind: 'unavailable' });
+  });
+
+  it('targets the new path for renames and rejects a file that disappears before launch', async () => {
+    const repository = await createRepositoryWithCommit();
+    await writeFile(join(repository.path, 'old-name.txt'), 'rename me\n');
+    await writeFile(join(repository.path, 'disappearing.txt'), 'temporary\n');
+    await repository.git('add', '--', 'old-name.txt', 'disappearing.txt');
+    await repository.git('commit', '--quiet', '-m', 'Add navigation fixtures');
+    await repository.git('mv', 'old-name.txt', 'new-name.txt');
+    await writeFile(join(repository.path, 'disappearing.txt'), 'changed\n');
+    const runtime = await startStandaloneRuntime({
+      projectPath: repository.path,
+      surfacePort: 0,
+    });
+    runtimes.push(runtime);
+    const snapshot = repositorySnapshotSchema.parse(
+      await (await protocolRequest(runtime, 'snapshot')).json(),
+    );
+    const renamed = snapshot.worktrees[0]?.changes.find(
+      ({ previousDisplayPath }) => previousDisplayPath === 'old-name.txt',
+    );
+    const disappearing = snapshot.worktrees[0]?.changes.find(
+      ({ displayPath }) => displayPath === 'disappearing.txt',
+    );
+    if (renamed?.nativeTargets[0] === undefined) {
+      throw new Error('Expected a renamed Changed File target.');
+    }
+    expect(renamed.displayPath).toBe('new-name.txt');
+    const renameCopy = await protocolRequest(runtime, 'native-actions', {
+      kind: 'copy_relative_path',
+      targetId: renamed.nativeTargets[0].targetId,
+    });
+    expect(await renameCopy.json()).toEqual({
+      kind: 'copy_text',
+      text: 'new-name.txt',
+    });
+
+    if (disappearing?.nativeTargets[0] === undefined) {
+      throw new Error('Expected a disappearing Changed File target.');
+    }
+    await unlink(join(repository.path, 'disappearing.txt'));
+    const staleOpen = await protocolRequest(runtime, 'native-actions', {
+      kind: 'open_default_app',
+      targetId: disappearing.nativeTargets[0].targetId,
+    });
+    expect(await staleOpen.json()).toEqual({
+      kind: 'unavailable',
+      message:
+        'The exact target is no longer available. Refresh or use a safe copy action.',
+    });
   });
 
   it('serves a typed non-Repository result for the Current Project', async () => {
@@ -505,7 +644,8 @@ describe('protocol runtime composition', () => {
 
 function protocolRequest(
   runtime: StandaloneRuntime,
-  endpoint: 'branches' | 'commands' | 'operations' | 'snapshot',
+  endpoint:
+    'branches' | 'commands' | 'native-actions' | 'operations' | 'snapshot',
   body?: unknown,
 ): Promise<Response> {
   const url = new URL(

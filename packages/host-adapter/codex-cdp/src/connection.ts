@@ -5,6 +5,7 @@ import type {
   NativeHostAction,
   SurfaceDescriptor,
 } from '@codex-git/host-adapter';
+import { isNativeHostAction } from '@codex-git/host-adapter';
 
 import type { CompatibleCodexAnchors } from './compatibility.js';
 import type { CodexRenderer, CspBypassLease } from './renderer.js';
@@ -93,6 +94,10 @@ export class CodexHostConnection implements HostConnection {
     return this.context;
   }
 
+  capabilities() {
+    return { openCodexContext: true, openFileInCodex: false } as const;
+  }
+
   async *contexts(): AsyncIterable<HostContext> {
     const queue = [this.currentContext()];
     let closed = this.closed;
@@ -138,6 +143,11 @@ export class CodexHostConnection implements HostConnection {
       case 'restore-native-surface':
         this.restoreNativeSurface();
         return { status: 'succeeded' };
+      case 'open-codex-context':
+        this.restoreNativeSurface();
+        return { status: 'succeeded' };
+      case 'open-file-in-codex':
+        return { status: 'unsupported' };
     }
   }
 
@@ -327,8 +337,7 @@ function isHostActionMessage(value: unknown): value is {
     typeof candidate.capability === 'string' &&
     typeof candidate.challenge === 'string' &&
     Number.isSafeInteger(candidate.generation) &&
-    typeof action === 'object' &&
-    action !== null &&
-    (action as Record<string, unknown>).kind === 'restore-native-surface'
+    isNativeHostAction(action) &&
+    action.kind === 'restore-native-surface'
   );
 }
