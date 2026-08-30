@@ -33,6 +33,9 @@ describe('Repository observation Git recipes', () => {
         return Buffer.from('origin\n');
       }
       if (args.includes('config')) {
+        if (args.at(-1)?.startsWith('^url\\.') === true) {
+          return Buffer.alloc(0);
+        }
         return Buffer.from(
           [
             'remote.origin.url\nhttps://user:secret@example.test/repository.git',
@@ -93,18 +96,20 @@ describe('Repository observation Git recipes', () => {
         true,
         1,
       ),
-      recipe(['-C', path, 'ls-remote', '--get-url', '--', 'origin'], true),
       recipe(
         [
           '-C',
           path,
-          'ls-remote',
-          '--get-url',
-          '--',
-          'push-alias:repository.git',
+          'config',
+          '--includes',
+          '--null',
+          '--get-regexp',
+          '^url\\..+\\.(insteadof|pushinsteadof)$',
         ],
         true,
+        1,
       ),
+      recipe(['-C', path, 'ls-remote', '--get-url', '--', 'origin'], true),
     ];
     expect(calls).toEqual([
       ...sharedRecipes,
