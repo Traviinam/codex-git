@@ -2,6 +2,8 @@ import { createHmac, randomBytes } from 'node:crypto';
 
 import type { OpaqueIdAuthority, RemoteId } from '@codex-git/protocol';
 
+import { observeEffectivePushUrls } from './effective-remote-urls.js';
+
 export interface RemoteSnapshot {
   readonly remoteId: RemoteId;
   readonly displayName: string;
@@ -69,6 +71,12 @@ export async function observeRemotes(
             1,
           ),
         );
+  const pushEndpointsByName = await observeEffectivePushUrls(
+    contextArgs,
+    names,
+    configured,
+    readGit,
+  );
   const resolved = await Promise.all(
     names.map(async (displayName) => {
       const fetchEndpoint = decodeLine(
@@ -77,22 +85,7 @@ export async function observeRemotes(
           true,
         ),
       );
-      const configuredPushEndpoints = configured
-        .filter(({ key }) => key === `remote.${displayName}.pushurl`)
-        .map(({ value }) => value);
-      const pushEndpoints =
-        configuredPushEndpoints.length === 0
-          ? [fetchEndpoint]
-          : await Promise.all(
-              configuredPushEndpoints.map(async (endpoint) =>
-                decodeLine(
-                  await readGit(
-                    [...contextArgs, 'ls-remote', '--get-url', '--', endpoint],
-                    true,
-                  ),
-                ),
-              ),
-            );
+      const pushEndpoints = pushEndpointsByName.get(displayName) ?? [];
       return { displayName, fetchEndpoint, pushEndpoints };
     }),
   );
@@ -154,9 +147,7 @@ function parseRemoteConfig(output: Uint8Array): readonly ConfigEntry[] {
     }
     entries.push({ key, value: record.slice(separator + 1) });
   }
-  return entries.sort((left, right) =>
-    `${left.key}\0${left.value}`.localeCompare(`${right.key}\0${right.value}`),
-  );
+  return entries;
 }
 
 function sanitizeRemoteHost(endpoint: string | undefined): string {
