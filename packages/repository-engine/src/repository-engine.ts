@@ -16,10 +16,17 @@ import {
   parseWorktreeListPorcelain,
   type WorktreePorcelainRecord,
 } from './worktree-porcelain.js';
+import { createGitEnvironment } from './git-environment.js';
+import { createRepositoryObserver } from './repository-observation.js';
 import {
   createRepositoryPublicationSession,
   type RepositorySession,
 } from './repository-publication.js';
+import {
+  cloneRemoteIdentityState,
+  createRemoteIdentityState,
+  type RemoteIdentityState,
+} from './remote-observation.js';
 
 const GIT_OUTPUT_LIMIT_BYTES = 4 * 1_024 * 1_024;
 const GIT_TIMEOUT_MILLISECONDS = 10_000;
@@ -73,6 +80,7 @@ interface RepositoryIdentityState {
   readonly evidence: string;
   readonly repositoryId: RepositoryId;
   generations: Map<string, WorktreeIdentityState>;
+  remoteIdentity: RemoteIdentityState;
 }
 
 interface SessionState {
@@ -127,6 +135,7 @@ export function createRepositoryEngine(): RepositoryEngine {
         evidence: resolved.repositoryEvidence,
         repositoryId: ids.issue('repository'),
         generations: new Map(),
+        remoteIdentity: createRemoteIdentityState(),
       };
       return createRepositoryPublicationSession({
         async read() {
@@ -134,6 +143,7 @@ export function createRepositoryEngine(): RepositoryEngine {
           const candidateIdentity: RepositoryIdentityState = {
             ...identity,
             generations: new Map(identity.generations),
+            remoteIdentity: cloneRemoteIdentityState(identity.remoteIdentity),
           };
           const result = await discoverRepository(
             resolved,
@@ -143,10 +153,18 @@ export function createRepositoryEngine(): RepositoryEngine {
             sessionGeneration,
           );
           assertSessionGeneration(state, sessionGeneration);
+          const observation = await createRepositoryObserver(
+            runGit,
+            ids,
+            candidateIdentity.remoteIdentity,
+          ).observe(result.repository);
+          assertSessionGeneration(state, sessionGeneration);
           return {
             discovery: result.repository,
+            observation,
             commit() {
               identity.generations = candidateIdentity.generations;
+              identity.remoteIdentity = candidateIdentity.remoteIdentity;
             },
           };
         },
@@ -156,6 +174,8 @@ export function createRepositoryEngine(): RepositoryEngine {
         close() {
           closeSession(state);
           identity.generations.clear();
+          identity.remoteIdentity.identities.clear();
+          identity.remoteIdentity.evidenceKey.fill(0);
           ids.revokeAll();
         },
       });
@@ -607,7 +627,7 @@ function runGit(
       [...args],
       {
         encoding: 'buffer',
-        env: gitEnvironment(),
+        env: createGitEnvironment(),
         maxBuffer: allowLargeOutput ? GIT_OUTPUT_LIMIT_BYTES : 64 * 1_024,
         timeout: GIT_TIMEOUT_MILLISECONDS,
         windowsHide: true,
@@ -629,18 +649,6 @@ function runGit(
       },
     );
   });
-}
-
-function gitEnvironment(): NodeJS.ProcessEnv {
-  const environment = { ...process.env };
-  for (const key of Object.keys(environment)) {
-    if (key.startsWith('GIT_')) {
-      delete environment[key];
-    }
-  }
-  environment.GIT_OPTIONAL_LOCKS = '0';
-  environment.LC_ALL = 'C';
-  return environment;
 }
 
 function beginSnapshot(state: SessionState): number {

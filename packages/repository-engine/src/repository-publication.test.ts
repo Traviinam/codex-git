@@ -26,6 +26,7 @@ describe('Repository snapshot revision ownership', () => {
 
     expect(changed.repositoryRevision).toBe(initial.repositoryRevision + 1);
     expect(changed.topologyRevision).toBe(initial.topologyRevision);
+    expect(changed.refsRevision).toBe(initial.refsRevision);
     expect(
       changed.worktrees.map(({ worktreeRevision }) => worktreeRevision),
     ).toEqual(
