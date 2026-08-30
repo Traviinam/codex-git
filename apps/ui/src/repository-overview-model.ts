@@ -1,4 +1,9 @@
-import type { OperationResult, RepositorySnapshot } from '@codex-git/protocol';
+import type {
+  BranchSearchResult,
+  OperationResult,
+  RefId,
+  RepositorySnapshot,
+} from '@codex-git/protocol';
 
 type ProtocolWorktree = RepositorySnapshot['worktrees'][number];
 type ProtocolOperation = RepositorySnapshot['operations'][number];
@@ -91,4 +96,14 @@ export interface RepositoryOverviewSource {
   subscribe(listener: () => void): () => void;
   requestRefresh(): void;
   requestFetch(remoteId: ProtocolRemote['remoteId'] | null): void;
+  searchBranches(
+    worktreeId: ProtocolWorktree['worktreeId'],
+    query: string,
+  ): Promise<BranchSearchResult>;
+  switchBranch(request: {
+    readonly worktreeId: ProtocolWorktree['worktreeId'];
+    readonly expectedWorktreeRevision: number;
+    readonly expectedRefsRevision: number;
+    readonly refId: RefId;
+  }): Promise<OperationResult>;
 }

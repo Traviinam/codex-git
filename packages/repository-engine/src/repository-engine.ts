@@ -229,6 +229,7 @@ export function createRepositoryEngine(): RepositoryEngine {
         createRepositorySession(publication, {
           fetchRemote: (remoteName, signal) =>
             fetchRemote(resolved.selectedWorktreePath, remoteName, signal),
+          runGit,
         }),
       );
     },

@@ -72,6 +72,8 @@ export async function startStandaloneRuntime(
         repositorySession === undefined || options.projectPath === undefined
           ? undefined
           : {
+              branchSearch: (request) =>
+                repositorySession!.searchBranches(request),
               snapshot: async () =>
                 toProtocolRepositorySnapshot(
                   await repositorySession!.requestRefresh(),
@@ -136,6 +138,9 @@ async function dispatchRepositoryCommand(
   session: RepositorySession,
   request: CommandEnvelope,
 ): Promise<OperationReceipt> {
+  if (request.command.kind === 'switch_branch') {
+    return session.dispatch(request);
+  }
   if (
     request.command.kind !== 'fetch_remote' &&
     request.command.kind !== 'fetch_all'

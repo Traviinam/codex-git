@@ -1,4 +1,26 @@
-import type { FileId, WorktreeId } from '@codex-git/protocol';
+import type {
+  BranchSearchResult,
+  FileId,
+  RefId,
+  WorktreeId,
+} from '@codex-git/protocol';
+
+export type BranchPickerState =
+  | { readonly kind: 'closed' }
+  | { readonly kind: 'loading'; readonly query: string }
+  | {
+      readonly kind: 'ready';
+      readonly query: string;
+      readonly refsRevision: number;
+      readonly candidates: BranchSearchResult['candidates'];
+      readonly switchingRefId: RefId | null;
+      readonly message: string | null;
+    }
+  | {
+      readonly kind: 'failed';
+      readonly query: string;
+      readonly message: string;
+    };
 
 import type {
   RepositoryOverviewSnapshot,
@@ -15,6 +37,7 @@ export interface RepositoryStoreSnapshot {
   readonly selectedFileId: FileId | null;
   readonly selectionNotice: string | null;
   readonly focusRecoveryRevision: number;
+  readonly branchPicker: BranchPickerState;
 }
 
 export interface RepositoryStore {
@@ -30,6 +53,10 @@ export interface RepositoryStore {
   requestFetch(
     remoteId: RepositoryOverviewSnapshot['remotes'][number]['remoteId'] | null,
   ): void;
+  openBranchPicker(): void;
+  closeBranchPicker(): void;
+  setBranchQuery(query: string): void;
+  switchBranch(refId: RefId): void;
 }
 
 export function createRepositoryStore(
@@ -46,6 +73,8 @@ export function createRepositoryStore(
   let selectedFileId: FileId | null = null;
   let selectionNotice: string | null = null;
   let focusRecoveryRevision = 0;
+  let branchPicker: BranchPickerState = { kind: 'closed' };
+  let branchRequestGeneration = 0;
   let storeSnapshot = buildSnapshot();
   let disposed = false;
 
@@ -73,11 +102,13 @@ export function createRepositoryStore(
             ? 'The selected Worktree is no longer available.'
             : `The selected Worktree changed. ${replacement.displayName} is now selected.`;
       if (previousSelection !== null) focusRecoveryRevision += 1;
+      closeBranches();
     } else if (branchChanged) {
       selectedHeadKey = headSelectionKey(selected);
       selectedFileId = null;
       selectionNotice =
         'Branch or HEAD changed; the previous file selection was cleared.';
+      closeBranches();
     } else {
       selectionNotice = null;
     }
@@ -108,6 +139,7 @@ export function createRepositoryStore(
       selectedHeadKey = headSelectionKey(worktree);
       selectedFileId = null;
       selectionNotice = null;
+      closeBranches();
       emit();
     },
     setSearchQuery(query) {
@@ -134,7 +166,120 @@ export function createRepositoryStore(
     requestFetch: (remoteId) => {
       if (!disposed) source.requestFetch(remoteId);
     },
+    openBranchPicker() {
+      if (disposed || selectedWorktreeId === null) return;
+      void loadBranches('');
+    },
+    closeBranchPicker() {
+      if (disposed) return;
+      closeBranches();
+      emit();
+    },
+    setBranchQuery(query) {
+      if (disposed || selectedWorktreeId === null) return;
+      void loadBranches(query);
+    },
+    switchBranch(refId) {
+      if (
+        disposed ||
+        selectedWorktreeId === null ||
+        branchPicker.kind !== 'ready' ||
+        branchPicker.switchingRefId !== null
+      ) {
+        return;
+      }
+      const worktree = findWorktree(sourceState, selectedWorktreeId);
+      const candidate = branchPicker.candidates.find(
+        (branch) => branch.refId === refId,
+      );
+      if (
+        worktree === null ||
+        candidate === undefined ||
+        (candidate.occupiedBy !== null &&
+          candidate.occupiedBy !== worktree.worktreeId)
+      ) {
+        return;
+      }
+      const currentPicker = branchPicker;
+      branchPicker = { ...currentPicker, switchingRefId: refId, message: null };
+      emit();
+      void source
+        .switchBranch({
+          worktreeId: worktree.worktreeId,
+          expectedWorktreeRevision: worktree.worktreeRevision,
+          expectedRefsRevision: currentPicker.refsRevision,
+          refId,
+        })
+        .then((result) => {
+          if (disposed) return;
+          if (result.kind === 'succeeded') {
+            closeBranches();
+            emit();
+            return;
+          }
+          const message =
+            'message' in result
+              ? result.message
+              : 'The Branch switch did not complete.';
+          branchPicker = {
+            ...currentPicker,
+            switchingRefId: null,
+            message,
+          };
+          emit();
+          void loadBranches(currentPicker.query);
+        })
+        .catch(() => {
+          if (disposed) return;
+          branchPicker = {
+            ...currentPicker,
+            switchingRefId: null,
+            message: 'The Branch switch could not be submitted.',
+          };
+          emit();
+        });
+    },
   };
+
+  async function loadBranches(query: string) {
+    const worktreeId = selectedWorktreeId;
+    if (worktreeId === null) return;
+    const ownGeneration = ++branchRequestGeneration;
+    branchPicker = { kind: 'loading', query };
+    emit();
+    try {
+      const result = await source.searchBranches(worktreeId, query);
+      if (
+        disposed ||
+        ownGeneration !== branchRequestGeneration ||
+        selectedWorktreeId !== worktreeId
+      ) {
+        return;
+      }
+      branchPicker = {
+        kind: 'ready',
+        query,
+        refsRevision: result.refsRevision,
+        candidates: result.candidates,
+        switchingRefId: null,
+        message: null,
+      };
+      emit();
+    } catch {
+      if (disposed || ownGeneration !== branchRequestGeneration) return;
+      branchPicker = {
+        kind: 'failed',
+        query,
+        message: 'Cached Branches could not be loaded.',
+      };
+      emit();
+    }
+  }
+
+  function closeBranches() {
+    branchRequestGeneration += 1;
+    branchPicker = { kind: 'closed' };
+  }
 
   function buildSnapshot(): RepositoryStoreSnapshot {
     return {
@@ -145,6 +290,7 @@ export function createRepositoryStore(
       selectedFileId,
       selectionNotice,
       focusRecoveryRevision,
+      branchPicker,
     };
   }
 

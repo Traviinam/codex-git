@@ -77,6 +77,7 @@ export const branchSearchResultSchema = z.strictObject({
         kind: z.enum(['local', 'remote_tracking']),
         displayName: z.string().min(1).max(1_024),
         occupiedBy: worktreeIdSchema.nullable(),
+        warning: z.string().min(1).max(512).nullable().optional(),
       }),
     )
     .max(5_000)

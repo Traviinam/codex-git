@@ -176,6 +176,28 @@ export function createRefreshingRepositorySession(
     }
   };
 
+  const dispatch = async (
+    request: Parameters<RepositorySession['dispatch']>[0],
+  ): ReturnType<RepositorySession['dispatch']> => {
+    foregroundRefreshes += 1;
+    try {
+      await Promise.all([backgroundRefresh, requestedRefresh]);
+      const receipt = await delegate.dispatch(request);
+      void delegate
+        .recoverOperation(receipt.operationId)
+        .catch(() => undefined)
+        .finally(() => {
+          foregroundRefreshes -= 1;
+          startPendingBackgroundRefresh();
+        });
+      return receipt;
+    } catch (error) {
+      foregroundRefreshes -= 1;
+      startPendingBackgroundRefresh();
+      throw error;
+    }
+  };
+
   return {
     snapshot: () => foreground(() => delegate.snapshot()),
     requestRefresh() {
@@ -189,6 +211,8 @@ export function createRefreshingRepositorySession(
     },
     subscribe: () => delegate.subscribe(),
     fetch: (request) => delegate.fetch(request),
+    searchBranches: (request) => delegate.searchBranches(request),
+    dispatch,
     cancelOperation: (operationId) => delegate.cancelOperation(operationId),
     recoverOperation: (operationId) => delegate.recoverOperation(operationId),
     async close() {

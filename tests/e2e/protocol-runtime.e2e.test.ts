@@ -11,6 +11,9 @@ import {
 import {
   clientCommandIdSchema,
   PROTOCOL_VERSION_HEADER,
+  branchSearchResultSchema,
+  operationReceiptSchema,
+  operationResultSchema,
   repositorySnapshotSchema,
 } from '@codex-git/protocol';
 
@@ -261,11 +264,77 @@ describe('protocol runtime composition', () => {
       status: 200,
     });
   });
+
+  it('searches and switches Branches through typed protocol endpoints', async () => {
+    const repository = await createRepositoryWithCommit();
+    await repository.git('branch', 'review-ready');
+    const runtime = await startStandaloneRuntime({
+      projectPath: repository.path,
+      surfacePort: 0,
+    });
+    runtimes.push(runtime);
+    const snapshot = repositorySnapshotSchema.parse(
+      await (await protocolRequest(runtime, 'snapshot')).json(),
+    );
+    const worktree = snapshot.worktrees[0]!;
+    const branches = branchSearchResultSchema.parse(
+      await (
+        await protocolRequest(runtime, 'branches', {
+          worktreeId: worktree.worktreeId,
+          query: 'review-ready',
+        })
+      ).json(),
+    );
+    const target = branches.candidates[0]!;
+
+    const receipt = operationReceiptSchema.parse(
+      await (
+        await protocolRequest(runtime, 'commands', {
+          clientCommandId: 'command_0123456789abcdef0123456789abcdef',
+          command: {
+            kind: 'switch_branch',
+            worktreeId: worktree.worktreeId,
+            expectedWorktreeRevision: worktree.worktreeRevision,
+            refId: target.refId,
+            expectedRefsRevision: branches.refsRevision,
+          },
+        })
+      ).json(),
+    );
+    let result = operationResultSchema.parse(
+      await (
+        await protocolRequest(runtime, 'operations', {
+          operationId: receipt.operationId,
+        })
+      ).json(),
+    );
+    for (
+      let attempt = 0;
+      result.kind === 'unknown_outcome' && attempt < 5;
+      attempt += 1
+    ) {
+      result = operationResultSchema.parse(
+        await (
+          await protocolRequest(runtime, 'operations', {
+            operationId: receipt.operationId,
+          })
+        ).json(),
+      );
+    }
+
+    expect(result).toMatchObject({
+      kind: 'succeeded',
+      result: { kind: 'branch_switch', displayName: 'review-ready' },
+    });
+    expect(
+      (await repository.git('branch', '--show-current')).stdout.trim(),
+    ).toBe('review-ready');
+  });
 });
 
 function protocolRequest(
   runtime: StandaloneRuntime,
-  endpoint: 'commands' | 'operations' | 'snapshot',
+  endpoint: 'branches' | 'commands' | 'operations' | 'snapshot',
   body?: unknown,
 ): Promise<Response> {
   const url = new URL(
