@@ -12,8 +12,10 @@ import {
 } from '@codex-git/repository-engine';
 import type {
   AbsolutePath,
+  CommandEnvelope,
   NativeActionRequest,
   NativeActionResult,
+  OperationReceipt,
   RepositoryId,
 } from '@codex-git/protocol';
 import { startLoopbackServer, type LoopbackServer } from '@codex-git/server';
@@ -82,14 +84,15 @@ export async function startStandaloneRuntime(
                 performFileNativeAction(repositorySession!, request),
               branchSearch: (request) =>
                 repositorySession!.searchBranches(request),
-              commands: (request) => repositorySession!.dispatch(request),
-              operationRecovery: (operationId) =>
-                repositorySession!.recoverOperation(operationId),
               snapshot: async () =>
                 toProtocolRepositorySnapshot(
                   await repositorySession!.requestRefresh(),
                   options.projectPath!,
                 ),
+              commands: (request) =>
+                dispatchRepositoryCommand(repositorySession!, request),
+              operationRecovery: (operationId) =>
+                repositorySession!.recoverOperation(operationId),
             },
     });
     if (repositorySession !== undefined && openedRepositoryId !== undefined) {
@@ -147,6 +150,38 @@ async function closeSurfaceServer(
   if (server === undefined) return;
   await server.environments.client?.waitForRequestsIdle();
   await server.close();
+}
+
+async function dispatchRepositoryCommand(
+  session: RepositorySession,
+  request: CommandEnvelope,
+): Promise<OperationReceipt> {
+  if (request.command.kind === 'switch_branch') {
+    return session.dispatch(request);
+  }
+  if (
+    request.command.kind !== 'fetch_remote' &&
+    request.command.kind !== 'fetch_all'
+  ) {
+    throw new Error('The Product Command is not implemented.');
+  }
+  const admission = await session.fetch({
+    repositoryId: request.command.repositoryId,
+    remoteId:
+      request.command.kind === 'fetch_remote' ? request.command.remoteId : null,
+    expectedRefsRevision: request.command.expectedRefsRevision,
+  });
+  if (admission.kind === 'closed') {
+    throw new Error('The Repository Session is closed.');
+  }
+  return {
+    clientCommandId: request.clientCommandId,
+    operationId:
+      admission.kind === 'accepted'
+        ? admission.operation.operationId
+        : admission.result.operationId,
+    disposition: 'accepted',
+  };
 }
 
 async function performFileNativeAction(

@@ -75,6 +75,7 @@ export interface RepositoryOverviewSnapshot {
   readonly fetchAvailable?: boolean;
   readonly remotes: readonly ProtocolRemote[];
   readonly operations: readonly ProtocolOperation[];
+  readonly fetchResult?: OperationResult;
   readonly worktrees: readonly WorktreeOverviewSnapshot[];
 }
 

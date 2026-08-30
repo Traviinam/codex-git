@@ -21,6 +21,7 @@ export {
   type PublishedWorktreeSnapshot,
   type RefreshError,
   type RefreshState,
+  type FetchState,
   type RepositoryInvalidation,
   type RepositoryOpenResult,
   RepositorySessionFailure,
@@ -29,6 +30,8 @@ export {
 } from './repository-publication.js';
 export {
   type FileNativeTarget,
+  type RemoteFetchResult,
+  type RepositoryFetchRequest,
   type RepositorySession,
   RepositoryTargetFailure,
 } from './repository-session.js';

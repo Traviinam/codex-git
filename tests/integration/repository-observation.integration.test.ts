@@ -366,6 +366,7 @@ describe('Repository observation', () => {
     });
     expect(snapshot.remotes).toEqual([
       {
+        configurationEvidence: expect.stringMatching(/^[0-9a-f]{64}$/u),
         remoteId: expect.stringMatching(/^remote_[0-9a-f]{32}$/u),
         displayName: 'origin',
         host: 'example.test',
@@ -409,6 +410,7 @@ describe('Repository observation', () => {
     const reconfigured = await snapshotRepository(session);
     expect(reconfigured.remotes).toEqual([
       {
+        configurationEvidence: expect.stringMatching(/^[0-9a-f]{64}$/u),
         remoteId: initialRemote.remoteId,
         displayName: 'origin',
         host: 'example.test',
@@ -472,6 +474,7 @@ describe('Repository observation', () => {
     const snapshot = await snapshotRepository(session);
     expect(snapshot.remotes).toEqual([
       {
+        configurationEvidence: expect.stringMatching(/^[0-9a-f]{64}$/u),
         remoteId: expect.stringMatching(/^remote_[0-9a-f]{32}$/u),
         displayName: 'custom',
         host: 'local',

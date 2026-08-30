@@ -9,6 +9,7 @@ import {
   type StandaloneRuntime,
 } from '@codex-git/launcher';
 import {
+  clientCommandIdSchema,
   PROTOCOL_VERSION_HEADER,
   branchSearchResultSchema,
   operationReceiptSchema,
@@ -156,6 +157,77 @@ describe('protocol runtime composition', () => {
           head: { kind: 'local_branch', displayName: branchName },
           status: { kind: 'clean' },
           upstream: { kind: 'unpublished' },
+        },
+      ],
+    });
+  });
+
+  it('dispatches Fetch through command and operation endpoints', async () => {
+    const repository = await createRepositoryWithCommit();
+    const remotePath = await mkdtemp(join(tmpdir(), 'codex-git-remote-'));
+    temporaryDirectories.push(remotePath);
+    await repository.git('init', '--quiet', '--bare', remotePath);
+    const branchName = (
+      await repository.git('branch', '--show-current')
+    ).stdout.trim();
+    await repository.git('remote', 'add', 'origin', remotePath);
+    await repository.git('push', '--quiet', '-u', 'origin', branchName);
+    const runtime = await startStandaloneRuntime({
+      projectPath: repository.path,
+      surfacePort: 0,
+    });
+    runtimes.push(runtime);
+    const snapshotResponse = await protocolRequest(runtime, 'snapshot');
+    const snapshot = repositorySnapshotSchema.parse(
+      await snapshotResponse.json(),
+    );
+    const remote = snapshot.remotes[0];
+    if (remote === undefined) throw new Error('Expected fixture Remote.');
+
+    const commandResponse = await protocolRequest(runtime, 'commands', {
+      clientCommandId: clientCommandIdSchema.parse(
+        'command_00000000000000000000000000000001',
+      ),
+      command: {
+        kind: 'fetch_remote',
+        repositoryId: snapshot.repositoryId,
+        remoteId: remote.remoteId,
+        expectedRefsRevision: snapshot.refsRevision,
+      },
+    });
+    const receipt = (await commandResponse.json()) as {
+      readonly operationId: string;
+    };
+
+    expect(commandResponse.status).toBe(200);
+    expect(receipt).toMatchObject({
+      clientCommandId: 'command_00000000000000000000000000000001',
+      disposition: 'accepted',
+      operationId: expect.stringMatching(/^operation_[0-9a-f]{32}$/u),
+    });
+    const operationResponse = await protocolRequest(runtime, 'operations', {
+      operationId: receipt.operationId,
+    });
+    expect(await operationResponse.json()).toMatchObject({
+      kind: 'succeeded',
+      operationId: receipt.operationId,
+      result: { kind: 'remote', summary: 'Fetched origin.' },
+    });
+    const fetched = repositorySnapshotSchema.parse(
+      await (await protocolRequest(runtime, 'snapshot')).json(),
+    );
+    expect(fetched).toMatchObject({
+      fetchAvailable: true,
+      fetch: { kind: 'current', fetchedAt: expect.any(String) },
+      worktrees: [
+        {
+          upstream: {
+            kind: 'tracking',
+            fetchedAt:
+              fetched.fetch.kind === 'current'
+                ? fetched.fetch.fetchedAt
+                : undefined,
+          },
         },
       ],
     });
@@ -373,33 +445,39 @@ describe('protocol runtime composition', () => {
     });
     runtimes.push(runtime);
     const snapshot = repositorySnapshotSchema.parse(
-      await protocolRequest(runtime, 'snapshot'),
+      await (await protocolRequest(runtime, 'snapshot')).json(),
     );
     const worktree = snapshot.worktrees[0]!;
     const branches = branchSearchResultSchema.parse(
-      await protocolRequest(runtime, 'branches', {
-        worktreeId: worktree.worktreeId,
-        query: 'review-ready',
-      }),
+      await (
+        await protocolRequest(runtime, 'branches', {
+          worktreeId: worktree.worktreeId,
+          query: 'review-ready',
+        })
+      ).json(),
     );
     const target = branches.candidates[0]!;
 
     const receipt = operationReceiptSchema.parse(
-      await protocolRequest(runtime, 'commands', {
-        clientCommandId: 'command_0123456789abcdef0123456789abcdef',
-        command: {
-          kind: 'switch_branch',
-          worktreeId: worktree.worktreeId,
-          expectedWorktreeRevision: worktree.worktreeRevision,
-          refId: target.refId,
-          expectedRefsRevision: branches.refsRevision,
-        },
-      }),
+      await (
+        await protocolRequest(runtime, 'commands', {
+          clientCommandId: 'command_0123456789abcdef0123456789abcdef',
+          command: {
+            kind: 'switch_branch',
+            worktreeId: worktree.worktreeId,
+            expectedWorktreeRevision: worktree.worktreeRevision,
+            refId: target.refId,
+            expectedRefsRevision: branches.refsRevision,
+          },
+        })
+      ).json(),
     );
     let result = operationResultSchema.parse(
-      await protocolRequest(runtime, 'operations', {
-        operationId: receipt.operationId,
-      }),
+      await (
+        await protocolRequest(runtime, 'operations', {
+          operationId: receipt.operationId,
+        })
+      ).json(),
     );
     for (
       let attempt = 0;
@@ -407,9 +485,11 @@ describe('protocol runtime composition', () => {
       attempt += 1
     ) {
       result = operationResultSchema.parse(
-        await protocolRequest(runtime, 'operations', {
-          operationId: receipt.operationId,
-        }),
+        await (
+          await protocolRequest(runtime, 'operations', {
+            operationId: receipt.operationId,
+          })
+        ).json(),
       );
     }
 
@@ -423,26 +503,24 @@ describe('protocol runtime composition', () => {
   });
 });
 
-async function protocolRequest(
+function protocolRequest(
   runtime: StandaloneRuntime,
   endpoint: 'branches' | 'commands' | 'operations' | 'snapshot',
   body?: unknown,
-): Promise<unknown> {
+): Promise<Response> {
   const url = new URL(
     runtime.sessionUrl.pathname.replace(/\/session$/u, `/${endpoint}`),
     runtime.sessionUrl,
   );
-  const response = await fetch(url, {
-    body: body === undefined ? undefined : JSON.stringify(body),
+  return fetch(url, {
+    method: body === undefined ? 'GET' : 'POST',
     headers: {
       origin: runtime.surfaceUrl.origin,
       [PROTOCOL_VERSION_HEADER]: '1',
       ...(body === undefined ? {} : { 'content-type': 'application/json' }),
     },
-    method: body === undefined ? 'GET' : 'POST',
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
-  expect(response.status).toBe(200);
-  return response.json();
 }
 
 function protocolBootstrap(surface: string): unknown {

@@ -8,8 +8,12 @@ import {
   type WorktreeFreshness,
 } from './observation-publication.js';
 import type { RepositoryObservation } from './repository-observation.js';
-import type { WorktreeId } from '@codex-git/protocol';
-import type { FileId, NativeTargetId } from '@codex-git/protocol';
+import type {
+  FileId,
+  NativeTargetId,
+  RemoteId,
+  WorktreeId,
+} from '@codex-git/protocol';
 import type { OperationSessionSummary } from './operation-session.js';
 
 export interface RepositorySnapshot
@@ -20,6 +24,11 @@ export interface RepositorySnapshot
   readonly topologyRevision: number;
   readonly refsRevision: number;
   readonly refresh: RefreshState;
+  readonly fetch: FetchState;
+  readonly remoteFetches?: readonly {
+    readonly remoteId: RemoteId;
+    readonly fetchedAt: string;
+  }[];
   readonly operations: readonly OperationSessionSummary[];
 }
 
@@ -30,6 +39,15 @@ export type RefreshState =
   | { readonly kind: 'fresh' }
   | { readonly kind: 'stale'; readonly error: RefreshError }
   | { readonly kind: 'failed'; readonly error: RefreshError };
+
+export type FetchState =
+  | { readonly kind: 'never' }
+  | { readonly kind: 'current'; readonly fetchedAt: string }
+  | {
+      readonly kind: 'stale' | 'failed';
+      readonly fetchedAt: string | null;
+      readonly message: string;
+    };
 
 export interface RefreshError {
   readonly code: 'git_read_failed' | 'git_output_too_large';
@@ -324,6 +342,8 @@ function publishCandidate(
           ? 1
           : previous.refsRevision + (refsChanged ? 1 : 0),
       refresh: { kind: 'fresh' },
+      fetch: previous?.fetch ?? { kind: 'never' },
+      remoteFetches: previous?.remoteFetches ?? [],
       operations: previous?.operations ?? [],
       ...publishedObservation,
     }),

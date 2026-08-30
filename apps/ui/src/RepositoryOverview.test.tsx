@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { fileIdSchema } from '@codex-git/protocol';
+import { fileIdSchema, operationIdSchema } from '@codex-git/protocol';
 
 import { App } from './overview.js';
 import { createOverviewFixture } from './overview-fixtures.js';
@@ -129,6 +129,46 @@ describe('Repository overview', () => {
     );
     expect(markup).toMatch(
       /aria-label="Fetch origin for codex-git"[^>]*disabled=""/u,
+    );
+  });
+
+  it('lists every Remote result after a Partial Success Fetch-all', () => {
+    const fixture = createOverviewFixture('one-worktree');
+    const source = fixture.source.getSnapshot();
+    if (source.kind !== 'repository') {
+      throw new Error('Expected Repository fixture');
+    }
+    fixture.publish({
+      kind: 'repository',
+      snapshot: {
+        ...source.snapshot,
+        fetchResult: {
+          kind: 'partial_success',
+          operationId: operationIdSchema.parse(
+            'operation_00000000000000000000000000000001',
+          ),
+          message: 'Some Remotes were fetched.',
+          effects: [
+            { kind: 'succeeded', label: 'origin' },
+            {
+              kind: 'failed_known',
+              label: 'backup',
+              code: 'offline',
+              message: 'The Remote could not be reached.',
+            },
+          ],
+        },
+      },
+    });
+
+    const markup = renderToStaticMarkup(
+      <App store={createRepositoryStore(fixture.source)} />,
+    );
+
+    expect(markup).toContain('Fetch-all result');
+    expect(markup).toContain('origin — Succeeded');
+    expect(markup).toContain(
+      'backup — Failed: The Remote could not be reached.',
     );
   });
 
