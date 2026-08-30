@@ -7,6 +7,12 @@ const loadingStore = createRepositoryStore({
   subscribe: () => () => undefined,
   requestRefresh: () => undefined,
   requestFetch: () => undefined,
+  requestDiff: () => Promise.reject(new Error('No Repository is loaded.')),
+  requestNativeAction: () =>
+    Promise.resolve({
+      kind: 'unavailable',
+      message: 'No Repository is loaded.',
+    }),
   searchBranches: async () => ({ refsRevision: 0, candidates: [] }),
   switchBranch: async () => {
     throw new Error('Branch switching is unavailable while loading.');

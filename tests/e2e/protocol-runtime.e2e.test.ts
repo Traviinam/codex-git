@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -231,6 +231,179 @@ describe('protocol runtime composition', () => {
         },
       ],
     });
+  });
+
+  it('publishes classified Changed Files through the protocol snapshot', async () => {
+    const repository = await createRepositoryWithCommit();
+    await writeFile(join(repository.path, 'README.md'), 'staged\n');
+    await repository.git('add', '--', 'README.md');
+    await writeFile(join(repository.path, 'README.md'), 'unstaged\n');
+    await writeFile(join(repository.path, 'untracked.txt'), 'untracked\n');
+    const runtime = await startStandaloneRuntime({
+      projectPath: repository.path,
+      surfacePort: 0,
+    });
+    runtimes.push(runtime);
+    const snapshotUrl = new URL(
+      runtime.sessionUrl.pathname.replace(/\/session$/u, '/snapshot'),
+      runtime.sessionUrl,
+    );
+
+    const response = await fetch(snapshotUrl, {
+      headers: {
+        origin: runtime.surfaceUrl.origin,
+        [PROTOCOL_VERSION_HEADER]: '1',
+      },
+    });
+    const body = repositorySnapshotSchema.parse(await response.json());
+
+    expect(response.status).toBe(200);
+    expect(body.worktrees[0]?.changes).toEqual([
+      expect.objectContaining({
+        kind: 'staged_change',
+        baseline: 'head_to_index',
+        displayPath: 'README.md',
+        previousDisplayPath: null,
+      }),
+      expect.objectContaining({
+        kind: 'change',
+        baseline: 'index_to_working_tree',
+        displayPath: 'README.md',
+        previousDisplayPath: null,
+      }),
+      expect.objectContaining({
+        kind: 'untracked',
+        baseline: 'empty_to_working_tree',
+        displayPath: 'untracked.txt',
+        previousDisplayPath: null,
+      }),
+    ]);
+    const stagedFileId = body.worktrees[0]?.changes.find(
+      ({ kind }) => kind === 'staged_change',
+    )?.fileId;
+    if (stagedFileId === undefined) {
+      throw new Error('The staged Changed File is absent.');
+    }
+    const diffResponse = await fetch(
+      new URL(
+        runtime.sessionUrl.pathname.replace(/\/session$/u, '/diff'),
+        runtime.sessionUrl,
+      ),
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: runtime.surfaceUrl.origin,
+          [PROTOCOL_VERSION_HEADER]: '1',
+        },
+        body: JSON.stringify({ fileId: stagedFileId }),
+      },
+    );
+
+    expect({
+      body: await diffResponse.json(),
+      status: diffResponse.status,
+    }).toMatchObject({
+      body: {
+        kind: 'text',
+        fileId: stagedFileId,
+        baseline: 'head_to_index',
+        content: expect.stringContaining('+staged'),
+      },
+      status: 200,
+    });
+    const copyTarget = body.worktrees[0]?.changes
+      .find(({ fileId }) => fileId === stagedFileId)
+      ?.nativeTargets.find(({ actions }) =>
+        actions.includes('copy_relative_path'),
+      );
+    if (copyTarget === undefined) {
+      throw new Error('The safe Changed File action is absent.');
+    }
+    const actionResponse = await fetch(
+      new URL(
+        runtime.sessionUrl.pathname.replace(/\/session$/u, '/native-actions'),
+        runtime.sessionUrl,
+      ),
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: runtime.surfaceUrl.origin,
+          [PROTOCOL_VERSION_HEADER]: '1',
+        },
+        body: JSON.stringify({
+          kind: 'copy_relative_path',
+          targetId: copyTarget.targetId,
+        }),
+      },
+    );
+    expect({
+      body: await actionResponse.json(),
+      status: actionResponse.status,
+    }).toEqual({
+      body: { kind: 'copy_text', text: 'README.md' },
+      status: 200,
+    });
+  });
+
+  it('does not advertise deleted files as openable and rejects symbolic-link opens', async () => {
+    const repository = await createRepositoryWithCommit();
+    await writeFile(join(repository.path, 'deleted.txt'), 'deleted\n');
+    await repository.git('add', '--', 'deleted.txt');
+    await repository.git('commit', '--quiet', '-m', 'Add deletion fixture');
+    await repository.git('rm', '--quiet', '--', 'deleted.txt');
+    await symlink('/tmp', join(repository.path, 'outside-link'));
+    const runtime = await startStandaloneRuntime({
+      projectPath: repository.path,
+      surfacePort: 0,
+    });
+    runtimes.push(runtime);
+    const response = await fetch(
+      new URL(
+        runtime.sessionUrl.pathname.replace(/\/session$/u, '/snapshot'),
+        runtime.sessionUrl,
+      ),
+      {
+        headers: {
+          origin: runtime.surfaceUrl.origin,
+          [PROTOCOL_VERSION_HEADER]: '1',
+        },
+      },
+    );
+    const snapshot = repositorySnapshotSchema.parse(await response.json());
+    const deletion = snapshot.worktrees[0]?.changes.find(
+      ({ displayPath }) => displayPath === 'deleted.txt',
+    );
+    const link = snapshot.worktrees[0]?.changes.find(
+      ({ displayPath }) => displayPath === 'outside-link',
+    );
+
+    expect(deletion?.nativeTargets[0]?.actions).toEqual(['copy_relative_path']);
+    expect(link?.nativeTargets[0]?.actions).toContain('open_default_app');
+    if (link?.nativeTargets[0] === undefined) {
+      throw new Error('The symbolic-link target is absent.');
+    }
+    const actionResponse = await fetch(
+      new URL(
+        runtime.sessionUrl.pathname.replace(/\/session$/u, '/native-actions'),
+        runtime.sessionUrl,
+      ),
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: runtime.surfaceUrl.origin,
+          [PROTOCOL_VERSION_HEADER]: '1',
+        },
+        body: JSON.stringify({
+          kind: 'open_default_app',
+          targetId: link.nativeTargets[0].targetId,
+        }),
+      },
+    );
+
+    expect(await actionResponse.json()).toMatchObject({ kind: 'unavailable' });
   });
 
   it('serves a typed non-Repository result for the Current Project', async () => {

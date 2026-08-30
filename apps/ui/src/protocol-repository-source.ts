@@ -6,6 +6,8 @@ import {
   operationResultSchema,
   PROTOCOL_VERSION,
   PROTOCOL_VERSION_HEADER,
+  diffResultSchema,
+  nativeActionResultSchema,
   branchSearchResultSchema,
   repositorySnapshotResultSchema,
   sessionMetadataSchema,
@@ -206,6 +208,32 @@ export function createProtocolRepositorySource(
           });
         });
     },
+    async requestDiff(fileId) {
+      const response = await protocolFetch(
+        fetcher,
+        endpointUrl(options.sessionUrl, 'diff'),
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ fileId }),
+        },
+      );
+      if (!response.ok) throw new Error('Diff request failed.');
+      return diffResultSchema.parse(await response.json());
+    },
+    async requestNativeAction(request) {
+      const response = await protocolFetch(
+        fetcher,
+        endpointUrl(options.sessionUrl, 'native-actions'),
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(request),
+        },
+      );
+      if (!response.ok) throw new Error('Native action request failed.');
+      return nativeActionResultSchema.parse(await response.json());
+    },
     async searchBranches(worktreeId, query) {
       const response = await protocolPost(
         fetcher,
@@ -348,7 +376,14 @@ function protocolPost(fetcher: typeof fetch, url: string, body: unknown) {
 
 function endpointUrl(
   sessionUrl: string,
-  endpoint: 'branches' | 'commands' | 'events' | 'operations' | 'snapshot',
+  endpoint:
+    | 'branches'
+    | 'commands'
+    | 'diff'
+    | 'events'
+    | 'native-actions'
+    | 'operations'
+    | 'snapshot',
 ) {
   return sessionUrl.replace(/\/session$/u, `/${endpoint}`);
 }

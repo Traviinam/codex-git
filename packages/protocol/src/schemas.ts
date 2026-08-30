@@ -215,6 +215,7 @@ export const nativeTargetDescriptorSchema = z.strictObject({
 const changedFileBase = {
   fileId: fileIdSchema,
   displayPath: z.string().min(1).max(4_096),
+  previousDisplayPath: z.string().min(1).max(4_096).nullable(),
   nativeTargets: z.array(nativeTargetDescriptorSchema).readonly(),
 } as const;
 

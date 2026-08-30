@@ -8,7 +8,12 @@ import {
   type WorktreeFreshness,
 } from './observation-publication.js';
 import type { RepositoryObservation } from './repository-observation.js';
-import type { RemoteId, WorktreeId } from '@codex-git/protocol';
+import type {
+  FileId,
+  NativeTargetId,
+  RemoteId,
+  WorktreeId,
+} from '@codex-git/protocol';
 import type { OperationSessionSummary } from './operation-session.js';
 
 export interface RepositorySnapshot
@@ -109,6 +114,8 @@ interface PublicationCandidate {
 }
 
 interface PublicationSessionOptions {
+  issueFileId?: () => FileId;
+  issueNativeTargetId?: () => NativeTargetId;
   read(
     signal: AbortSignal,
     refreshGeneration: number,
@@ -196,6 +203,8 @@ export function createRepositoryPublicationSession(
       published,
       candidate.observation,
       privateRefsEvidence,
+      options.issueFileId,
+      options.issueNativeTargetId,
     );
     const next = nextCandidate.snapshot;
     candidate.commit();
@@ -280,6 +289,8 @@ function publishCandidate(
   previous?: RepositorySnapshot,
   observation?: RepositoryObservation,
   previousPrivateRefsEvidence?: PrivateRefsEvidence,
+  issueFileId?: () => FileId,
+  issueNativeTargetId?: () => NativeTargetId,
 ): {
   readonly snapshot: RepositorySnapshot;
   readonly privateRefsEvidence: PrivateRefsEvidence;
@@ -294,6 +305,8 @@ function publishCandidate(
     previous,
     observation,
     previousPrivateRefsEvidence,
+    issueFileId,
+    issueNativeTargetId,
   );
   const topologyChanged =
     previous === undefined ||
@@ -370,6 +383,7 @@ function deepFreeze<T>(value: T): T {
   if (value === null || typeof value !== 'object') {
     return value;
   }
+  if (ArrayBuffer.isView(value)) return value;
   for (const child of Object.values(value)) {
     deepFreeze(child);
   }

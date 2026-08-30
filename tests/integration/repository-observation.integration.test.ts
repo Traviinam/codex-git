@@ -31,6 +31,316 @@ afterEach(async () => {
 });
 
 describe('Repository observation', () => {
+  it('publishes independent Changed Files for every observed Diff Baseline', async () => {
+    const repository = await createRepositoryWithCommit();
+    await writeFile(join(repository.path, 'README.md'), 'staged\n');
+    await repository.git('add', '--', 'README.md');
+    await writeFile(join(repository.path, 'README.md'), 'unstaged\n');
+    await writeFile(join(repository.path, 'untracked.txt'), 'untracked\n');
+    const session = await createRepositoryEngine().open(
+      repository.path as AbsolutePath,
+    );
+
+    const snapshot = await snapshotRepository(session);
+    const changes = snapshot.worktrees[0]?.changes ?? [];
+    const readme = changes.filter(
+      ({ displayPath }) => displayPath === 'README.md',
+    );
+
+    expect(readme).toEqual([
+      expect.objectContaining({
+        fileId: expect.stringMatching(/^file_[0-9a-f]{32}$/u),
+        kind: 'staged_change',
+        baseline: 'head_to_index',
+      }),
+      expect.objectContaining({
+        fileId: expect.stringMatching(/^file_[0-9a-f]{32}$/u),
+        kind: 'change',
+        baseline: 'index_to_working_tree',
+      }),
+    ]);
+    expect(readme[0]?.fileId).not.toBe(readme[1]?.fileId);
+    expect(changes).toContainEqual(
+      expect.objectContaining({
+        fileId: expect.stringMatching(/^file_[0-9a-f]{32}$/u),
+        kind: 'untracked',
+        baseline: 'empty_to_working_tree',
+        displayPath: 'untracked.txt',
+      }),
+    );
+    await session.close();
+  });
+
+  it('reads staged, unstaged, and Untracked diffs through opaque File IDs', async () => {
+    const repository = await createRepositoryWithCommit();
+    await writeFile(join(repository.path, 'README.md'), 'staged\n');
+    await repository.git('add', '--', 'README.md');
+    await writeFile(join(repository.path, 'README.md'), 'unstaged\n');
+    await writeFile(join(repository.path, 'untracked.txt'), 'untracked\n');
+    const session = await createRepositoryEngine().open(
+      repository.path as AbsolutePath,
+    );
+    const snapshot = await snapshotRepository(session);
+    const changes = snapshot.worktrees[0]?.changes ?? [];
+    const staged = changes.find(({ kind }) => kind === 'staged_change')!;
+    const unstaged = changes.find(({ kind }) => kind === 'change')!;
+    const untracked = changes.find(({ kind }) => kind === 'untracked')!;
+
+    const [stagedDiff, unstagedDiff, untrackedDiff] = await Promise.all([
+      session.diff(staged.fileId),
+      session.diff(unstaged.fileId),
+      session.diff(untracked.fileId),
+    ]);
+
+    expect(stagedDiff).toMatchObject({
+      kind: 'text',
+      fileId: staged.fileId,
+      baseline: 'head_to_index',
+    });
+    expect(stagedDiff.kind === 'text' ? stagedDiff.content : '').toContain(
+      '+staged',
+    );
+    expect(stagedDiff.kind === 'text' ? stagedDiff.content : '').not.toContain(
+      'unstaged',
+    );
+    expect(unstagedDiff).toMatchObject({
+      kind: 'text',
+      fileId: unstaged.fileId,
+      baseline: 'index_to_working_tree',
+    });
+    expect(unstagedDiff.kind === 'text' ? unstagedDiff.content : '').toContain(
+      '+unstaged',
+    );
+    expect(untrackedDiff).toMatchObject({
+      kind: 'text',
+      fileId: untracked.fileId,
+      baseline: 'empty_to_working_tree',
+    });
+    expect(
+      untrackedDiff.kind === 'text' ? untrackedDiff.content : '',
+    ).toContain('+untracked');
+    await session.close();
+  });
+
+  it('keeps File IDs stable only while their Worktree revision is unchanged', async () => {
+    const repository = await createRepositoryWithCommit();
+    await writeFile(join(repository.path, 'README.md'), 'first change\n');
+    const session = await createRepositoryEngine().open(
+      repository.path as AbsolutePath,
+    );
+
+    const initial = await snapshotRepository(session);
+    const initialWorktree = initial.worktrees[0]!;
+    const initialFileId = initialWorktree.changes[0]!.fileId;
+    const unchanged = await snapshotRepository(session);
+
+    expect(unchanged.worktrees[0]?.worktreeRevision).toBe(
+      initialWorktree.worktreeRevision,
+    );
+    expect(unchanged.worktrees[0]?.changes[0]?.fileId).toBe(initialFileId);
+
+    await writeFile(join(repository.path, 'untracked.txt'), 'new file\n');
+    const changed = await snapshotRepository(session);
+    const changedWorktree = changed.worktrees[0]!;
+
+    expect(changedWorktree.worktreeRevision).toBe(
+      initialWorktree.worktreeRevision + 1,
+    );
+    expect(changedWorktree.changes[0]?.fileId).not.toBe(initialFileId);
+    await expect(session.diff(initialFileId)).rejects.toThrow(
+      'stale or unavailable',
+    );
+    await session.close();
+  });
+
+  it('preserves rename origins and keeps staged deletions reviewable', async () => {
+    const repository = await createRepositoryWithCommit();
+    await writeFile(join(repository.path, 'rename-old.txt'), 'rename\n');
+    await writeFile(join(repository.path, 'deleted.txt'), 'deleted\n');
+    await repository.git('add', '--', 'rename-old.txt', 'deleted.txt');
+    await repository.git('commit', '--quiet', '-m', 'Add rename fixtures');
+    await repository.git('mv', '--', 'rename-old.txt', 'rename-new.txt');
+    await writeFile(
+      join(repository.path, 'rename-new.txt'),
+      'rename\nmodified\n',
+    );
+    await repository.git('rm', '--quiet', '--', 'deleted.txt');
+    const session = await createRepositoryEngine().open(
+      repository.path as AbsolutePath,
+    );
+
+    const snapshot = await snapshotRepository(session);
+    const staged = snapshot.worktrees[0]?.changes.filter(
+      ({ kind }) => kind === 'staged_change',
+    );
+
+    expect(staged).toEqual([
+      expect.objectContaining({
+        displayPath: 'deleted.txt',
+        previousDisplayPath: null,
+      }),
+      expect.objectContaining({
+        displayPath: 'rename-new.txt',
+        previousDisplayPath: 'rename-old.txt',
+      }),
+    ]);
+    expect(
+      snapshot.worktrees[0]?.changes.find(
+        ({ kind, displayPath }) =>
+          kind === 'change' && displayPath === 'rename-new.txt',
+      ),
+    ).toMatchObject({ previousDisplayPath: null });
+    const deletion = staged?.find(
+      ({ displayPath }) => displayPath === 'deleted.txt',
+    );
+    const rename = staged?.find(
+      ({ displayPath }) => displayPath === 'rename-new.txt',
+    );
+    if (deletion === undefined || rename === undefined) {
+      throw new Error('Rename or deletion is absent.');
+    }
+    const [deletionDiff, renameDiff] = await Promise.all([
+      session.diff(deletion.fileId),
+      session.diff(rename.fileId),
+    ]);
+    expect(deletionDiff.kind === 'text' ? deletionDiff.content : '').toContain(
+      '-deleted',
+    );
+    expect(renameDiff.kind === 'text' ? renameDiff.content : '').toContain(
+      'rename from rename-old.txt',
+    );
+    await expect(
+      session.resolveFileNativeTarget(deletion.nativeTargetId),
+    ).resolves.toMatchObject({
+      absolutePath: join(await realpath(repository.path), 'deleted.txt'),
+      canOpen: false,
+      relativePath: 'deleted.txt',
+    });
+    await session.close();
+  });
+
+  it('publishes and reviews Conflict content without implying resolution', async () => {
+    const repository = await createRepositoryWithCommit();
+    const baseBranch = (
+      await repository.git('branch', '--show-current')
+    ).stdout.trim();
+    await repository.git('switch', '--quiet', '-c', 'conflict-side');
+    await writeFile(join(repository.path, 'README.md'), 'side\n');
+    await repository.git('add', '--', 'README.md');
+    await repository.git('commit', '--quiet', '-m', 'Change side');
+    await repository.git('switch', '--quiet', baseBranch);
+    await writeFile(join(repository.path, 'README.md'), 'base\n');
+    await repository.git('add', '--', 'README.md');
+    await repository.git('commit', '--quiet', '-m', 'Change base');
+    await expect(
+      repository.git('merge', '--no-edit', 'conflict-side'),
+    ).rejects.toBeDefined();
+    const session = await createRepositoryEngine().open(
+      repository.path as AbsolutePath,
+    );
+
+    const snapshot = await snapshotRepository(session);
+    const conflict = snapshot.worktrees[0]?.changes.find(
+      ({ kind }) => kind === 'conflict',
+    );
+    if (conflict === undefined) throw new Error('Conflict is absent.');
+    const diff = await session.diff(conflict.fileId);
+
+    expect(conflict).toMatchObject({
+      baseline: 'conflict',
+      displayPath: 'README.md',
+      previousDisplayPath: null,
+    });
+    expect(diff).toMatchObject({
+      kind: 'text',
+      fileId: conflict.fileId,
+      baseline: 'conflict',
+    });
+    expect(diff.kind === 'text' ? diff.content : '').toContain('<<<<<<<');
+    expect(diff.kind === 'text' ? diff.content : '').toContain(
+      'Conflict index stages: base=present; ours=present; theirs=present.',
+    );
+    expect(diff.kind === 'text' ? diff.content : '').toContain('@@ -0,0');
+    expect(diff.kind === 'text' ? diff.content : '').not.toContain('@@@');
+    await session.close();
+  });
+
+  it('degrades binary, undecodable, oversized, and excessively long Diffs to metadata', async () => {
+    const repository = await createRepositoryWithCommit();
+    await writeFile(
+      join(repository.path, 'binary.dat'),
+      Uint8Array.of(0, 1, 2),
+    );
+    await writeFile(
+      join(repository.path, 'undecodable.txt'),
+      Uint8Array.of(0xff, 0xfe),
+    );
+    await writeFile(
+      join(repository.path, 'oversized.txt'),
+      `x${'a'.repeat(2 * 1_024 * 1_024)}\n`,
+    );
+    await writeFile(
+      join(repository.path, 'many-lines.txt'),
+      'line\n'.repeat(20_001),
+    );
+    const session = await createRepositoryEngine().open(
+      repository.path as AbsolutePath,
+    );
+    const snapshot = await snapshotRepository(session);
+    const changes = snapshot.worktrees[0]!.changes;
+    const byPath = new Map(
+      changes.map((change) => [change.displayPath, change]),
+    );
+
+    const [binary, undecodable, oversized, manyLines] = await Promise.all(
+      ['binary.dat', 'undecodable.txt', 'oversized.txt', 'many-lines.txt'].map(
+        async (path) => session.diff(byPath.get(path)!.fileId),
+      ),
+    );
+
+    expect(binary).toMatchObject({
+      kind: 'binary',
+      byteCount: expect.any(Number),
+    });
+    expect(undecodable).toMatchObject({
+      kind: 'undecodable',
+      byteCount: expect.any(Number),
+    });
+    expect(oversized).toMatchObject({
+      kind: 'too_large',
+      byteCount: expect.any(Number),
+    });
+    expect(manyLines).toMatchObject({
+      kind: 'too_large',
+      lineCount: expect.any(Number),
+    });
+    await session.close();
+  });
+
+  it('reviews unusual literal paths without treating them as Git options', async () => {
+    const repository = await createRepositoryWithCommit();
+    const unusualPath = '-leading [bracket]\nname.txt';
+    await writeFile(join(repository.path, unusualPath), 'unusual\n');
+    const session = await createRepositoryEngine().open(
+      repository.path as AbsolutePath,
+    );
+    const snapshot = await snapshotRepository(session);
+    const change = snapshot.worktrees[0]!.changes.find(
+      ({ displayPath }) => displayPath === unusualPath,
+    );
+    if (change === undefined) throw new Error('Unusual path is absent.');
+
+    const diff = await session.diff(change.fileId);
+
+    expect(diff).toMatchObject({
+      kind: 'text',
+      fileId: change.fileId,
+      baseline: 'empty_to_working_tree',
+    });
+    expect(diff.kind === 'text' ? diff.content : '').toContain('+unusual');
+    await session.close();
+  });
+
   it('publishes coherent local refs, sanitized Remotes, Index, and status facts', async () => {
     const repository = await createRepositoryWithCommit();
     await repository.git(

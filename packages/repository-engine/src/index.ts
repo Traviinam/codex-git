@@ -8,6 +8,7 @@ export {
   type WorktreeAvailability,
 } from './repository-engine.js';
 export {
+  type ChangedFileObservation,
   type InProgressGitOperation,
   type IndexSnapshot,
   type RefSnapshot,
@@ -28,7 +29,9 @@ export {
   type WorktreeFreshness,
 } from './repository-publication.js';
 export {
+  type FileNativeTarget,
   type RemoteFetchResult,
   type RepositoryFetchRequest,
   type RepositorySession,
+  RepositoryTargetFailure,
 } from './repository-session.js';

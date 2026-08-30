@@ -1,5 +1,9 @@
+import { execFile } from 'node:child_process';
+import { lstat, realpath } from 'node:fs/promises';
 import type { Server } from 'node:http';
+import { isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 import type { HostConnection } from '@codex-git/host-adapter';
 import {
@@ -9,6 +13,8 @@ import {
 import type {
   AbsolutePath,
   CommandEnvelope,
+  NativeActionRequest,
+  NativeActionResult,
   OperationReceipt,
   RepositoryId,
 } from '@codex-git/protocol';
@@ -20,6 +26,7 @@ import { protocolBootstrapPlugin } from './protocol-bootstrap.js';
 import { toProtocolRepositorySnapshot } from './repository-protocol-adapter.js';
 
 const loopbackHost = '127.0.0.1';
+const execFileAsync = promisify(execFile);
 const uiConfigPath = fileURLToPath(
   new URL('../../ui/vite.config.ts', import.meta.url),
 );
@@ -72,6 +79,9 @@ export async function startStandaloneRuntime(
         repositorySession === undefined || options.projectPath === undefined
           ? undefined
           : {
+              diff: ({ fileId }) => repositorySession!.diff(fileId),
+              nativeActions: (request) =>
+                performFileNativeAction(repositorySession!, request),
               branchSearch: (request) =>
                 repositorySession!.searchBranches(request),
               snapshot: async () =>
@@ -172,6 +182,56 @@ async function dispatchRepositoryCommand(
         : admission.result.operationId,
     disposition: 'accepted',
   };
+}
+
+async function performFileNativeAction(
+  session: RepositorySession,
+  request: NativeActionRequest,
+): Promise<NativeActionResult> {
+  try {
+    const target = await session.resolveFileNativeTarget(request.targetId);
+    if (request.kind === 'copy_relative_path') {
+      return { kind: 'copy_text', text: target.relativePath };
+    }
+    if (request.kind !== 'open_default_app') {
+      return {
+        kind: 'unavailable',
+        message: 'This file action is not available yet.',
+      };
+    }
+    if (!target.canOpen || target.absolutePath === null) {
+      throw new Error('The file cannot be opened from this change state.');
+    }
+    const metadata = await lstat(target.absolutePath);
+    if (metadata.isSymbolicLink()) {
+      throw new Error('Symbolic links cannot be opened from change review.');
+    }
+    const [resolvedWorktree, resolvedFile] = await Promise.all([
+      realpath(target.worktreePath),
+      realpath(target.absolutePath),
+    ]);
+    const relativeResolvedPath = relative(resolvedWorktree, resolvedFile);
+    if (
+      relativeResolvedPath === '' ||
+      relativeResolvedPath === '..' ||
+      relativeResolvedPath.startsWith(
+        `..${process.platform === 'win32' ? '\\' : '/'}`,
+      ) ||
+      isAbsolute(relativeResolvedPath)
+    ) {
+      throw new Error('The file resolves outside its Worktree.');
+    }
+    await execFileAsync('/usr/bin/open', ['--', resolvedFile], {
+      timeout: 10_000,
+      windowsHide: true,
+    });
+    return { kind: 'performed' };
+  } catch {
+    return {
+      kind: 'unavailable',
+      message: 'The file is no longer available. Refresh and try again.',
+    };
+  }
 }
 
 async function forwardRepositoryInvalidations(
