@@ -1,26 +1,25 @@
-import type {
-  DiscoveredWorktree,
-  RepositoryDiscovery,
-} from './repository-engine.js';
+import type { RepositoryDiscovery } from './repository-engine.js';
 import { InvalidationStream } from './invalidation-stream.js';
+import {
+  publishObservedFacts,
+  type PublishedObservationWorktree,
+  type PublishedRepositoryObservation,
+  type WorktreeFreshness,
+} from './observation-publication.js';
+import type { RepositoryObservation } from './repository-observation.js';
 
-export interface RepositorySnapshot extends Omit<
-  RepositoryDiscovery,
-  'worktrees'
-> {
+export interface RepositorySnapshot
+  extends
+    Omit<RepositoryDiscovery, 'worktrees'>,
+    PublishedRepositoryObservation {
   readonly repositoryRevision: number;
   readonly topologyRevision: number;
   readonly refsRevision: number;
   readonly refresh: RefreshState;
-  readonly worktrees: readonly PublishedWorktreeSnapshot[];
 }
 
-export interface PublishedWorktreeSnapshot extends Omit<
-  DiscoveredWorktree,
-  'canonicalPathBytes'
-> {
-  readonly worktreeRevision: number;
-}
+export type PublishedWorktreeSnapshot = PublishedObservationWorktree;
+export type { WorktreeFreshness };
 
 export type RefreshState =
   | { readonly kind: 'fresh' }
@@ -68,6 +67,7 @@ export class RepositorySessionFailure extends Error {
 
 interface PublicationCandidate {
   readonly discovery: RepositoryDiscovery;
+  readonly observation: RepositoryObservation;
   commit(): void;
 }
 
@@ -84,6 +84,7 @@ export function createRepositoryPublicationSession(
   let closed = false;
   let generation = 0;
   let published: RepositorySnapshot | undefined;
+  let privateRefsEvidence: string | undefined;
 
   return {
     async snapshot() {
@@ -143,12 +144,19 @@ export function createRepositoryPublicationSession(
         }
         return { kind: 'repository', repository: published };
       }
-      const next = publishDiscovery(candidate.discovery, published);
+      const nextCandidate = publishCandidate(
+        candidate.discovery,
+        published,
+        candidate.observation,
+        privateRefsEvidence,
+      );
+      const next = nextCandidate.snapshot;
       candidate.commit();
       if (published !== undefined && sameExternalState(published, next)) {
         return { kind: 'repository', repository: published };
       }
       published = next;
+      privateRefsEvidence = nextCandidate.privateRefsEvidence;
       invalidations.publish({
         kind: 'repository',
         repositoryRevision: next.repositoryRevision,
@@ -191,34 +199,31 @@ function classifyRefreshError(error: unknown): RefreshError {
 export function publishDiscovery(
   discovery: RepositoryDiscovery,
   previous?: RepositorySnapshot,
+  observation?: RepositoryObservation,
 ): RepositorySnapshot {
-  const previousWorktrees = new Map(
-    previous?.worktrees.map((worktree) => [worktree.worktreeId, worktree]),
+  return publishCandidate(discovery, previous, observation).snapshot;
+}
+
+function publishCandidate(
+  discovery: RepositoryDiscovery,
+  previous?: RepositorySnapshot,
+  observation?: RepositoryObservation,
+  previousPrivateRefsEvidence?: string,
+): {
+  readonly snapshot: RepositorySnapshot;
+  readonly privateRefsEvidence: string;
+} {
+  const {
+    refsChanged,
+    worktreeChanged,
+    privateRefsEvidence,
+    ...publishedObservation
+  } = publishObservedFacts(
+    discovery,
+    previous,
+    observation,
+    previousPrivateRefsEvidence,
   );
-  let worktreeChanged = previous === undefined;
-  const worktrees = discovery.worktrees.map((worktree) => {
-    const prior = previousWorktrees.get(worktree.worktreeId);
-    const changed =
-      prior === undefined ||
-      worktreeEvidence(worktree) !== worktreeEvidence(prior);
-    worktreeChanged ||= changed;
-    const published: Omit<DiscoveredWorktree, 'canonicalPathBytes'> = {
-      worktreeId: worktree.worktreeId,
-      generation: worktree.generation,
-      displayPath: worktree.displayPath,
-      canonicalPath: worktree.canonicalPath,
-      role: worktree.role,
-      head: worktree.head,
-      gitLock: worktree.gitLock,
-      availability: worktree.availability,
-    };
-    return {
-      ...published,
-      worktreeRevision:
-        prior === undefined ? 1 : prior.worktreeRevision + (changed ? 1 : 0),
-    };
-  });
-  worktreeChanged ||= previousWorktrees.size !== worktrees.length;
   const topologyChanged =
     previous === undefined ||
     topologyEvidence(discovery) !== topologyEvidence(previous);
@@ -227,25 +232,35 @@ export function publishDiscovery(
     discovery.selectedWorktreeId !== previous.selectedWorktreeId;
   const recovered = previous !== undefined && previous.refresh.kind !== 'fresh';
 
-  return deepFreeze({
-    repositoryId: discovery.repositoryId,
-    commonGitDirectory: discovery.commonGitDirectory,
-    selectedWorktreeId: discovery.selectedWorktreeId,
-    repositoryRevision:
-      previous === undefined
-        ? 1
-        : previous.repositoryRevision +
-          (topologyChanged || worktreeChanged || selectionChanged || recovered
-            ? 1
-            : 0),
-    topologyRevision:
-      previous === undefined
-        ? 1
-        : previous.topologyRevision + (topologyChanged ? 1 : 0),
-    refsRevision: previous?.refsRevision ?? 1,
-    refresh: { kind: 'fresh' },
-    worktrees,
-  });
+  return {
+    privateRefsEvidence,
+    snapshot: deepFreeze({
+      repositoryId: discovery.repositoryId,
+      commonGitDirectory: discovery.commonGitDirectory,
+      selectedWorktreeId: discovery.selectedWorktreeId,
+      repositoryRevision:
+        previous === undefined
+          ? 1
+          : previous.repositoryRevision +
+            (topologyChanged ||
+            refsChanged ||
+            worktreeChanged ||
+            selectionChanged ||
+            recovered
+              ? 1
+              : 0),
+      topologyRevision:
+        previous === undefined
+          ? 1
+          : previous.topologyRevision + (topologyChanged ? 1 : 0),
+      refsRevision:
+        previous === undefined
+          ? 1
+          : previous.refsRevision + (refsChanged ? 1 : 0),
+      refresh: { kind: 'fresh' },
+      ...publishedObservation,
+    }),
+  };
 }
 
 function topologyEvidence(repository: {
@@ -271,12 +286,6 @@ function topologyEvidence(repository: {
       worktreeId: worktree.worktreeId,
     })),
   });
-}
-
-function worktreeEvidence(
-  worktree: Pick<PublishedWorktreeSnapshot, 'gitLock' | 'head'>,
-): string {
-  return JSON.stringify({ head: worktree.head, gitLock: worktree.gitLock });
 }
 
 function sameExternalState(left: unknown, right: unknown): boolean {
