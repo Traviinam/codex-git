@@ -188,6 +188,7 @@ export function createRefreshingRepositorySession(
       return requestedRefresh;
     },
     subscribe: () => delegate.subscribe(),
+    fetch: (request) => delegate.fetch(request),
     cancelOperation: (operationId) => delegate.cancelOperation(operationId),
     recoverOperation: (operationId) => delegate.recoverOperation(operationId),
     async close() {

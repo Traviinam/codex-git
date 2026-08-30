@@ -6,6 +6,7 @@ export interface RemoteSnapshot {
   readonly remoteId: RemoteId;
   readonly displayName: string;
   readonly host: string;
+  readonly configurationEvidence: string;
 }
 
 export interface RemoteIdentityState {
@@ -98,16 +99,25 @@ export async function observeRemotes(
   );
 
   const retained = new Map<string, RemoteId>();
-  const remotes = resolved.map(({ displayName, fetchEndpoint }) => {
-    const remoteId =
-      identity.identities.get(displayName) ?? ids.issue('remote');
-    retained.set(displayName, remoteId);
-    return {
-      remoteId,
-      displayName,
-      host: sanitizeRemoteHost(fetchEndpoint),
-    };
-  });
+  const remotes = resolved.map(
+    ({ displayName, fetchEndpoint, pushEndpoints }) => {
+      const remoteId =
+        identity.identities.get(displayName) ?? ids.issue('remote');
+      retained.set(displayName, remoteId);
+      return {
+        remoteId,
+        displayName,
+        host: sanitizeRemoteHost(fetchEndpoint),
+        configurationEvidence: keyedEvidence(identity.evidenceKey, {
+          config: configured.filter(({ key }) =>
+            key.startsWith(`remote.${displayName}.`),
+          ),
+          fetchEndpoint,
+          pushEndpoints,
+        }),
+      };
+    },
+  );
   identity.identities = retained;
 
   return {

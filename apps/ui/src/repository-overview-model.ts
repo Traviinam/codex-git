@@ -1,4 +1,4 @@
-import type { RepositorySnapshot } from '@codex-git/protocol';
+import type { OperationResult, RepositorySnapshot } from '@codex-git/protocol';
 
 type ProtocolWorktree = RepositorySnapshot['worktrees'][number];
 type ProtocolOperation = RepositorySnapshot['operations'][number];
@@ -65,6 +65,7 @@ export interface RepositoryOverviewSnapshot {
   readonly fetchAvailable?: boolean;
   readonly remotes: readonly ProtocolRemote[];
   readonly operations: readonly ProtocolOperation[];
+  readonly fetchResult?: OperationResult;
   readonly worktrees: readonly WorktreeOverviewSnapshot[];
 }
 

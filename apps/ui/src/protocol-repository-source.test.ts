@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { PROTOCOL_VERSION, PROTOCOL_VERSION_HEADER } from '@codex-git/protocol';
+import {
+  PROTOCOL_VERSION,
+  PROTOCOL_VERSION_HEADER,
+  remoteIdSchema,
+} from '@codex-git/protocol';
 
 import { createProtocolRepositorySource } from './protocol-repository-source.js';
 
@@ -145,6 +149,102 @@ describe('ProtocolRepositorySource', () => {
         refresh: {
           kind: 'failed',
           message: 'The Repository snapshot could not be loaded.',
+        },
+      },
+    });
+  });
+
+  it('submits an explicit Fetch intent with opaque snapshot authority', async () => {
+    const commands: unknown[] = [];
+    const operations: unknown[] = [];
+    const source = createProtocolRepositorySource({
+      projectPath: '/projects/codex-git',
+      sessionUrl: 'http://127.0.0.1:4173/instance/fixture-token/v1/session',
+      createEventSource: () => new FakeEventSource(),
+      fetch: async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/session')) {
+          return jsonResponse({
+            ...sessionMetadata,
+            capabilities: {
+              ...sessionMetadata.capabilities,
+              commands: true,
+              operationRecovery: true,
+            },
+          });
+        }
+        if (url.endsWith('/snapshot')) {
+          return jsonResponse({
+            ...repositorySnapshot,
+            fetchAvailable: true,
+            remotes: [
+              {
+                remoteId: 'remote_0123456789abcdef0123456789abcdef',
+                displayName: 'origin',
+                host: 'example.test',
+              },
+            ],
+          });
+        }
+        if (url.endsWith('/operations')) {
+          operations.push(JSON.parse(String(init?.body)));
+          return jsonResponse({
+            kind: 'succeeded',
+            operationId: 'operation_0123456789abcdef0123456789abcdef',
+            result: { kind: 'remote', summary: 'Fetched origin.' },
+          });
+        }
+        const command = JSON.parse(String(init?.body)) as {
+          readonly clientCommandId: string;
+        };
+        commands.push({
+          body: command,
+          contentType: new Headers(init?.headers).get('content-type'),
+          method: init?.method,
+          url,
+          version: new Headers(init?.headers).get(PROTOCOL_VERSION_HEADER),
+        });
+        return jsonResponse({
+          operationId: 'operation_0123456789abcdef0123456789abcdef',
+          clientCommandId: command.clientCommandId,
+          disposition: 'accepted',
+        });
+      },
+    });
+    await until(() => source.getSnapshot().kind === 'repository');
+
+    source.requestFetch(
+      remoteIdSchema.parse('remote_0123456789abcdef0123456789abcdef'),
+    );
+    await until(() => commands.length === 1);
+    await until(() => operations.length === 1);
+
+    expect(commands).toEqual([
+      {
+        body: {
+          clientCommandId: expect.stringMatching(/^command_[0-9a-f]{32}$/u),
+          command: {
+            kind: 'fetch_remote',
+            repositoryId: repositorySnapshot.repositoryId,
+            remoteId: 'remote_0123456789abcdef0123456789abcdef',
+            expectedRefsRevision: repositorySnapshot.refsRevision,
+          },
+        },
+        contentType: 'application/json',
+        method: 'POST',
+        url: 'http://127.0.0.1:4173/instance/fixture-token/v1/commands',
+        version: String(PROTOCOL_VERSION),
+      },
+    ]);
+    expect(operations).toEqual([
+      { operationId: 'operation_0123456789abcdef0123456789abcdef' },
+    ]);
+    expect(source.getSnapshot()).toMatchObject({
+      kind: 'repository',
+      snapshot: {
+        fetchResult: {
+          kind: 'succeeded',
+          result: { kind: 'remote', summary: 'Fetched origin.' },
         },
       },
     });

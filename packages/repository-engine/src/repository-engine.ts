@@ -29,6 +29,7 @@ import {
   createRepositorySession,
   type RepositorySession,
 } from './repository-session.js';
+import { createRemoteFetcher } from './remote-fetch.js';
 import {
   cloneRemoteIdentityState,
   createRemoteIdentityState,
@@ -38,6 +39,7 @@ import {
 const GIT_OUTPUT_LIMIT_BYTES = 4 * 1_024 * 1_024;
 const GIT_TIMEOUT_MILLISECONDS = 10_000;
 const ZERO_OBJECT_ID = /^(?:0{40}|0{64})$/u;
+const fetchRemote = createRemoteFetcher();
 
 export interface RepositoryDiscovery {
   readonly repositoryId: RepositoryId;
@@ -224,7 +226,10 @@ export function createRepositoryEngine(): RepositoryEngine {
         },
       });
       return createRefreshingRepositorySession(
-        createRepositorySession(publication),
+        createRepositorySession(publication, {
+          fetchRemote: (remoteName, signal) =>
+            fetchRemote(resolved.selectedWorktreePath, remoteName, signal),
+        }),
       );
     },
   };

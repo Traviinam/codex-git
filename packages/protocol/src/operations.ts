@@ -49,6 +49,13 @@ export const operationRecoveryRequestSchema = z.strictObject({
   operationId: operationIdSchema,
 });
 
+const operationFailureEffectSchema = z.strictObject({
+  label: z.string().min(1).max(256),
+  kind: z.literal('failed_known'),
+  code: operationFailureCodeSchema,
+  message: messageSchema,
+});
+
 export const operationResultSchema = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('succeeded'),
@@ -73,6 +80,12 @@ export const operationResultSchema = z.discriminatedUnion('kind', [
     operationId: operationIdSchema,
     code: operationFailureCodeSchema,
     message: messageSchema,
+    effects: z
+      .array(operationFailureEffectSchema)
+      .min(2)
+      .max(1_000)
+      .readonly()
+      .optional(),
   }),
   z.strictObject({
     kind: z.literal('partial_success'),
@@ -85,12 +98,7 @@ export const operationResultSchema = z.discriminatedUnion('kind', [
             label: z.string().min(1).max(256),
             kind: z.literal('succeeded'),
           }),
-          z.strictObject({
-            label: z.string().min(1).max(256),
-            kind: z.literal('failed_known'),
-            code: operationFailureCodeSchema,
-            message: messageSchema,
-          }),
+          operationFailureEffectSchema,
         ]),
       )
       .min(2)
@@ -115,6 +123,7 @@ export const operationResultSchema = z.discriminatedUnion('kind', [
 ]);
 
 export type OperationReceipt = z.infer<typeof operationReceiptSchema>;
+export type OperationFailureCode = z.infer<typeof operationFailureCodeSchema>;
 export type OperationRecoveryRequest = z.infer<
   typeof operationRecoveryRequestSchema
 >;

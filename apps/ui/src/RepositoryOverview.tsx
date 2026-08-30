@@ -110,6 +110,12 @@ export function RepositoryOverview({
         worktree.status.kind === 'unavailable'),
   ).length;
   const fetchAvailable = snapshot.fetchAvailable !== false;
+  const fetchResultEffects =
+    snapshot.fetchResult?.kind === 'partial_success'
+      ? snapshot.fetchResult.effects
+      : snapshot.fetchResult?.kind === 'failed_known'
+        ? snapshot.fetchResult.effects
+        : undefined;
 
   return (
     <main className="repository-overview">
@@ -190,6 +196,33 @@ export function RepositoryOverview({
           ) : null}
         </div>
       </header>
+
+      {snapshot.fetchResult === undefined ? null : (
+        <section aria-live="polite" className="fetch-result" role="status">
+          <h2>
+            {fetchResultEffects !== undefined
+              ? 'Fetch-all result'
+              : 'Fetch result'}
+          </h2>
+          {fetchResultEffects !== undefined ? (
+            <>
+              <p>{fetchResultLabel(snapshot.fetchResult)}</p>
+              <ul>
+                {fetchResultEffects.map((effect) => (
+                  <li key={effect.label}>
+                    {effect.label} —{' '}
+                    {effect.kind === 'succeeded'
+                      ? 'Succeeded'
+                      : `Failed: ${effect.message}`}
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <p>{fetchResultLabel(snapshot.fetchResult)}</p>
+          )}
+        </section>
+      )}
 
       <div
         className={
@@ -442,6 +475,23 @@ function fetchLabel(
       : formatTime(fetch.fetchedAt);
   if (fetch.kind === 'current') return `Fetched ${time}`;
   return `${fetch.kind === 'stale' ? 'Stale' : 'Fetch failed'} — ${time}. ${fetch.message}`;
+}
+
+function fetchResultLabel(
+  result: import('@codex-git/protocol').OperationResult,
+): string {
+  switch (result.kind) {
+    case 'succeeded':
+      return result.result.kind === 'remote'
+        ? result.result.summary
+        : 'Fetch succeeded.';
+    case 'rejected':
+    case 'failed_known':
+    case 'unknown_outcome':
+      return result.message;
+    case 'partial_success':
+      return result.message;
+  }
 }
 
 function upstreamLabel(

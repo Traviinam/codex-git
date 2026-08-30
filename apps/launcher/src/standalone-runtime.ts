@@ -6,7 +6,12 @@ import {
   createRepositoryEngine,
   type RepositorySession,
 } from '@codex-git/repository-engine';
-import type { AbsolutePath, RepositoryId } from '@codex-git/protocol';
+import type {
+  AbsolutePath,
+  CommandEnvelope,
+  OperationReceipt,
+  RepositoryId,
+} from '@codex-git/protocol';
 import { startLoopbackServer, type LoopbackServer } from '@codex-git/server';
 import { StandaloneHostAdapter } from '@codex-git/host-adapter-standalone';
 import { createServer as createViteServer, type ViteDevServer } from 'vite';
@@ -72,6 +77,10 @@ export async function startStandaloneRuntime(
                   await repositorySession!.requestRefresh(),
                   options.projectPath!,
                 ),
+              commands: (request) =>
+                dispatchRepositoryCommand(repositorySession!, request),
+              operationRecovery: (operationId) =>
+                repositorySession!.recoverOperation(operationId),
             },
     });
     if (repositorySession !== undefined && openedRepositoryId !== undefined) {
@@ -121,6 +130,35 @@ export async function startStandaloneRuntime(
     await closeResources();
     throw error;
   }
+}
+
+async function dispatchRepositoryCommand(
+  session: RepositorySession,
+  request: CommandEnvelope,
+): Promise<OperationReceipt> {
+  if (
+    request.command.kind !== 'fetch_remote' &&
+    request.command.kind !== 'fetch_all'
+  ) {
+    throw new Error('The Product Command is not implemented.');
+  }
+  const admission = await session.fetch({
+    repositoryId: request.command.repositoryId,
+    remoteId:
+      request.command.kind === 'fetch_remote' ? request.command.remoteId : null,
+    expectedRefsRevision: request.command.expectedRefsRevision,
+  });
+  if (admission.kind === 'closed') {
+    throw new Error('The Repository Session is closed.');
+  }
+  return {
+    clientCommandId: request.clientCommandId,
+    operationId:
+      admission.kind === 'accepted'
+        ? admission.operation.operationId
+        : admission.result.operationId,
+    disposition: 'accepted',
+  };
 }
 
 async function forwardRepositoryInvalidations(

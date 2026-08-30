@@ -19,10 +19,15 @@ export {
   type PublishedWorktreeSnapshot,
   type RefreshError,
   type RefreshState,
+  type FetchState,
   type RepositoryInvalidation,
   type RepositoryOpenResult,
   RepositorySessionFailure,
   type RepositorySnapshot,
   type WorktreeFreshness,
 } from './repository-publication.js';
-export { type RepositorySession } from './repository-session.js';
+export {
+  type RemoteFetchResult,
+  type RepositoryFetchRequest,
+  type RepositorySession,
+} from './repository-session.js';

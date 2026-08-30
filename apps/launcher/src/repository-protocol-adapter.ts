@@ -33,6 +33,12 @@ export function toProtocolRepositorySnapshot(
     source.worktrees.find(({ role }) => role === 'main') ?? source.worktrees[0];
   const repositoryPath =
     main?.canonicalPath ?? main?.displayPath ?? projectPath;
+  const remoteFetches = new Map(
+    source.remoteFetches?.map(({ remoteId, fetchedAt }) => [
+      remoteId,
+      fetchedAt,
+    ]),
+  );
   return repositorySnapshotSchema.parse({
     kind: 'repository',
     repositoryId: source.repositoryId,
@@ -42,10 +48,21 @@ export function toProtocolRepositorySnapshot(
     displayName: displayName(repositoryPath),
     path: repositoryPath,
     refresh: refresh(source.refresh),
-    fetch: { kind: 'never' },
-    fetchAvailable: false,
-    worktrees: source.worktrees.map(worktree),
-    remotes: source.remotes,
+    fetch: source.fetch,
+    fetchAvailable: source.remotes.length > 0,
+    worktrees: source.worktrees.map((candidate) =>
+      worktree(
+        candidate,
+        candidate.upstream.kind === 'tracking'
+          ? (remoteFetches.get(candidate.upstream.remoteId) ?? null)
+          : lastSuccessfulFetchAt(source.fetch),
+      ),
+    ),
+    remotes: source.remotes.map(({ remoteId, displayName, host }) => ({
+      remoteId,
+      displayName,
+      host,
+    })),
     operations: source.operations.map((operation) => ({
       operationId: operation.operationId,
       category: operation.category,
@@ -55,7 +72,7 @@ export function toProtocolRepositorySnapshot(
   });
 }
 
-function worktree(source: PublishedWorktreeSnapshot) {
+function worktree(source: PublishedWorktreeSnapshot, fetchedAt: string | null) {
   const path = source.canonicalPath ?? source.displayPath;
   return {
     worktreeId: source.worktreeId,
@@ -84,7 +101,7 @@ function worktree(source: PublishedWorktreeSnapshot) {
             },
     indexTree: null,
     status: worktreeStatus(source),
-    upstream: upstream(source),
+    upstream: upstream(source, fetchedAt),
     changes: [],
     nativeTargets: [],
   };
@@ -136,7 +153,7 @@ function worktreeStatus(source: PublishedWorktreeSnapshot) {
   };
 }
 
-function upstream(source: PublishedWorktreeSnapshot) {
+function upstream(source: PublishedWorktreeSnapshot, fetchedAt: string | null) {
   switch (source.upstream.kind) {
     case 'tracking':
       return {
@@ -150,13 +167,13 @@ function upstream(source: PublishedWorktreeSnapshot) {
           source.upstream.aheadBehind.kind === 'cached'
             ? source.upstream.aheadBehind.behind
             : null,
-        fetchedAt: null,
+        fetchedAt,
       };
     case 'unpublished':
       return {
         kind: 'unpublished' as const,
         remoteName: null,
-        fetchedAt: null,
+        fetchedAt,
       };
     case 'not_applicable':
       return {
@@ -172,6 +189,12 @@ function upstream(source: PublishedWorktreeSnapshot) {
         reason: 'The Upstream is temporarily unavailable.',
       };
   }
+}
+
+function lastSuccessfulFetchAt(
+  fetch: import('@codex-git/repository-engine').FetchState,
+): string | null {
+  return fetch.kind === 'never' ? null : fetch.fetchedAt;
 }
 
 function displayName(path: string): string {
