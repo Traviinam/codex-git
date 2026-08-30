@@ -184,6 +184,49 @@ describe('effective push destination evidence', () => {
       restoreEnvironment('HOME', previousHome);
     }
   });
+
+  it('matches system Git for mixed pushInsteadOf URLs and an empty URL base', async () => {
+    const repository = await createRepositoryWithCommit();
+    await repository.git('config', '--add', 'remote.origin.url', 'alias:one');
+    await repository.git('config', '--add', 'remote.origin.url', 'other:two');
+    await repository.git(
+      'config',
+      'url.ssh://push.example/.pushInsteadOf',
+      'alias:',
+    );
+    await repository.git(
+      'config',
+      'url.ssh://other-v1.example/.insteadOf',
+      'other:',
+    );
+    await repository.git('config', '--add', 'remote.empty.url', 'empty:repo');
+    await repository.git('config', 'url..pushInsteadOf', 'empty:');
+    const session = await createRepositoryEngine().open(
+      repository.path as AbsolutePath,
+    );
+    try {
+      const initial = await snapshotRepository(session);
+
+      await repository.git(
+        'config',
+        '--unset-all',
+        'url.ssh://other-v1.example/.insteadOf',
+      );
+      await repository.git(
+        'config',
+        'url.ssh://other-v2.example/.insteadOf',
+        'other:',
+      );
+      const unmatchedFallbackChanged = await snapshotRepository(session);
+      expect(unmatchedFallbackChanged.refsRevision).toBe(initial.refsRevision);
+
+      await repository.git('config', 'url..pushInsteadOf', 'unused:');
+      const emptyBaseChanged = await snapshotRepository(session);
+      expect(emptyBaseChanged.refsRevision).toBe(initial.refsRevision + 1);
+    } finally {
+      await session.close();
+    }
+  });
 });
 
 function includedConfig(version: string): string {
@@ -203,7 +246,7 @@ function conditionalConfig(version: string): string {
     '[remote "origin"]',
     '\turl = conditional:three.git',
     `[url "ssh://conditional-${version}.example/"]`,
-    '\tinsteadOf = conditional:',
+    '\tpushInsteadOf = conditional:',
     '',
   ].join('\n');
 }

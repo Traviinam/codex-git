@@ -104,7 +104,7 @@ describe('Repository observation Git recipes', () => {
           '--includes',
           '--null',
           '--get-regexp',
-          '^url\\..+\\.(insteadof|pushinsteadof)$',
+          '^url\\..*\\.(insteadof|pushinsteadof)$',
         ],
         true,
         1,

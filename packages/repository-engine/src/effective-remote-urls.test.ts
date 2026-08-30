@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  parseUrlRewriteRules,
   resolveEffectivePushUrls,
   type UrlRewriteRule,
 } from './effective-remote-urls.js';
 
 describe('effective Remote push URLs', () => {
-  it('rewrites every fetch URL with the longest pushInsteadOf match and falls back to insteadOf', () => {
+  it('keeps only fetch URLs with a pushInsteadOf match when any URL matches', () => {
     const rules: readonly UrlRewriteRule[] = [
       rule('instead_of', 'alias:', 'ssh://fetch.example/'),
       rule('push_instead_of', 'alias:', 'ssh://push.example/general/'),
@@ -20,10 +21,19 @@ describe('effective Remote push URLs', () => {
         [],
         rules,
       ),
-    ).toEqual([
-      'ssh://push.example/team/one.git',
-      'ssh://other.example/two.git',
-    ]);
+    ).toEqual(['ssh://push.example/team/one.git']);
+  });
+
+  it('falls back to insteadOf for every fetch URL when none match pushInsteadOf', () => {
+    const rules: readonly UrlRewriteRule[] = [
+      rule('instead_of', 'one:', 'ssh://one.example/'),
+      rule('instead_of', 'two:', 'ssh://two.example/'),
+      rule('push_instead_of', 'unused:', 'ssh://unused.example/'),
+    ];
+
+    expect(
+      resolveEffectivePushUrls(['one:a.git', 'two:b.git'], [], rules),
+    ).toEqual(['ssh://one.example/a.git', 'ssh://two.example/b.git']);
   });
 
   it('rewrites every explicit pushurl with insteadOf and ignores pushInsteadOf', () => {
@@ -54,6 +64,14 @@ describe('effective Remote push URLs', () => {
     expect(
       resolveEffectivePushUrls(['alias:repository.git'], [], rules),
     ).toEqual(['ssh://first.example/repository.git']);
+  });
+
+  it('parses and applies an empty URL base', () => {
+    const rules = parseUrlRewriteRules('url..pushinsteadof\nalias:\0');
+
+    expect(
+      resolveEffectivePushUrls(['alias:repository.git'], [], rules),
+    ).toEqual(['repository.git']);
   });
 });
 

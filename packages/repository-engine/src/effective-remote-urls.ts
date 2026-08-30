@@ -16,7 +16,7 @@ export type EffectiveRemoteUrlReader = (
 ) => Promise<Uint8Array>;
 
 export const URL_REWRITE_CONFIG_PATTERN =
-  '^url\\..+\\.(insteadof|pushinsteadof)$';
+  '^url\\..*\\.(insteadof|pushinsteadof)$';
 
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
 
@@ -66,7 +66,7 @@ export function parseUrlRewriteRules(
       continue;
     }
     const separator = record.indexOf('\n');
-    const match = /^url\.(.+)\.(insteadof|pushinsteadof)$/u.exec(
+    const match = /^url\.(.*)\.(insteadof|pushinsteadof)$/u.exec(
       record.slice(0, separator),
     );
     if (separator < 0 || match === null) {
@@ -89,12 +89,13 @@ export function resolveEffectivePushUrls(
   if (pushUrls.length > 0) {
     return pushUrls.map((url) => rewrite(url, rules, 'instead_of'));
   }
-  return fetchUrls.map((url) => {
-    const pushed = matchingRule(url, rules, 'push_instead_of');
-    return pushed === undefined
-      ? rewrite(url, rules, 'instead_of')
-      : applyRule(url, pushed);
+  const pushed = fetchUrls.flatMap((url) => {
+    const matched = matchingRule(url, rules, 'push_instead_of');
+    return matched === undefined ? [] : [applyRule(url, matched)];
   });
+  return pushed.length > 0
+    ? pushed
+    : fetchUrls.map((url) => rewrite(url, rules, 'instead_of'));
 }
 
 function rewrite(
