@@ -2,6 +2,11 @@ import type { Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
 
 import type { HostConnection } from '@codex-git/host-adapter';
+import {
+  createRepositoryEngine,
+  type RepositorySession,
+} from '@codex-git/repository-engine';
+import type { AbsolutePath, RepositoryId } from '@codex-git/protocol';
 import { startLoopbackServer, type LoopbackServer } from '@codex-git/server';
 import { StandaloneHostAdapter } from '@codex-git/host-adapter-standalone';
 import { createServer as createViteServer, type ViteDevServer } from 'vite';
@@ -14,6 +19,7 @@ const uiConfigPath = fileURLToPath(
 );
 
 export interface StandaloneRuntimeOptions {
+  readonly projectPath?: string;
   readonly surfacePort?: number;
 }
 
@@ -30,17 +36,34 @@ export async function startStandaloneRuntime(
   let protocolServer: LoopbackServer | undefined;
   let surfaceServer: ViteDevServer | undefined;
   let hostConnection: HostConnection | null = null;
+  let repositorySession: RepositorySession | undefined;
+  let invalidationPump = Promise.resolve();
 
   async function closeResources(): Promise<void> {
     await Promise.all([
       hostConnection?.close(),
+      repositorySession?.close(),
       surfaceServer?.close(),
       protocolServer?.close(),
     ]);
+    await invalidationPump;
   }
 
   try {
     protocolServer = await startLoopbackServer({ allowedOrigins: ['null'] });
+    if (options.projectPath !== undefined) {
+      repositorySession = await createRepositoryEngine().open(
+        options.projectPath as AbsolutePath,
+      );
+      const opened = await repositorySession.requestRefresh();
+      if (opened.kind === 'repository') {
+        invalidationPump = forwardRepositoryInvalidations(
+          repositorySession,
+          protocolServer,
+          opened.repository.repositoryId,
+        );
+      }
+    }
     surfaceServer = await createViteServer({
       configFile: uiConfigPath,
       plugins: [protocolBootstrapPlugin(protocolServer.sessionUrl)],
@@ -78,6 +101,29 @@ export async function startStandaloneRuntime(
   } catch (error) {
     await closeResources();
     throw error;
+  }
+}
+
+async function forwardRepositoryInvalidations(
+  session: RepositorySession,
+  server: Pick<LoopbackServer, 'publish'>,
+  repositoryId: RepositoryId,
+): Promise<void> {
+  for await (const invalidation of session.subscribe()) {
+    server.publish(
+      invalidation.kind === 'operation'
+        ? {
+            kind: 'operation_progress',
+            operationId: invalidation.operation.operationId,
+            phase: invalidation.operation.phase,
+            progress: invalidation.operation.progress,
+          }
+        : {
+            kind: 'repository_revision',
+            repositoryId,
+            repositoryRevision: invalidation.repositoryRevision,
+          },
+    );
   }
 }
 

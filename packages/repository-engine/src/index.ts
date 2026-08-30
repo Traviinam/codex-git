@@ -10,6 +10,7 @@ export {
 export {
   type IndexSnapshot,
   type RefSnapshot,
+  type UpstreamSnapshot,
   type WorktreeObservationError,
   type WorktreeStatusSummary,
 } from './repository-observation.js';
@@ -20,8 +21,8 @@ export {
   type RefreshState,
   type RepositoryInvalidation,
   type RepositoryOpenResult,
-  type RepositorySession,
   RepositorySessionFailure,
   type RepositorySnapshot,
   type WorktreeFreshness,
 } from './repository-publication.js';
+export { type RepositorySession } from './repository-session.js';

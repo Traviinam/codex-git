@@ -6,7 +6,7 @@ import type {
 
 type OperationPhase = RepositorySnapshot['operations'][number]['phase'];
 
-interface TimeoutScheduler {
+export interface TimeoutScheduler {
   schedule(
     milliseconds: number,
     onTimeout: () => void,
@@ -81,7 +81,7 @@ class LifecycleStore<
   #state: 'open' | 'closing' | 'closed' = 'open';
 
   constructor(options: OperationLifecycleStoreOptions<Record, Summary>) {
-    this.#closeTimeout = milliseconds(
+    this.#closeTimeout = validateTimeoutMilliseconds(
       options.closeTimeoutMilliseconds ?? 250,
       'closeTimeoutMilliseconds',
     );
@@ -267,7 +267,7 @@ function nonnegative(value: number, name: string) {
   return value;
 }
 
-function milliseconds(value: number, name: string) {
+export function validateTimeoutMilliseconds(value: number, name: string) {
   const validated = nonnegative(value, name);
   if (validated > 2_147_483_647) {
     throw new Error(`${name} exceeds the supported timer range.`);
@@ -302,7 +302,7 @@ function waitBounded(
   });
 }
 
-const systemTimeoutScheduler: TimeoutScheduler = {
+export const systemTimeoutScheduler: TimeoutScheduler = {
   schedule(milliseconds, onTimeout) {
     const timer = setTimeout(onTimeout, milliseconds);
     return { cancel: () => clearTimeout(timer) };

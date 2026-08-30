@@ -1,3 +1,6 @@
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -6,10 +9,19 @@ import {
 } from '@codex-git/launcher';
 import { PROTOCOL_VERSION_HEADER } from '@codex-git/protocol';
 
+import {
+  createTemporaryGitRepository,
+  type TemporaryGitRepository,
+} from '../fixtures/temporary-git-repository.js';
+
 const runtimes: StandaloneRuntime[] = [];
+const repositories: TemporaryGitRepository[] = [];
 
 afterEach(async () => {
   await Promise.all(runtimes.splice(0).map((runtime) => runtime.close()));
+  await Promise.all(
+    repositories.splice(0).map((repository) => repository.dispose()),
+  );
 });
 
 describe('protocol runtime composition', () => {
@@ -52,4 +64,55 @@ describe('protocol runtime composition', () => {
       tokenIsOpaque: true,
     });
   });
+
+  it('streams Repository invalidations after an external selected Worktree change', async () => {
+    const repository = await createTemporaryGitRepository();
+    repositories.push(repository);
+    await repository.git('config', 'user.name', 'Codex Git Tests');
+    await repository.git('config', 'user.email', 'codex-git@example.test');
+    await writeFile(join(repository.path, 'README.md'), 'fixture\n');
+    await repository.git('add', '--', 'README.md');
+    await repository.git('commit', '--quiet', '-m', 'Create fixture');
+    const runtime = await startStandaloneRuntime({
+      projectPath: repository.path,
+      surfacePort: 0,
+    });
+    runtimes.push(runtime);
+    const eventsUrl = new URL(
+      runtime.sessionUrl.pathname.replace(/\/session$/u, '/events'),
+      runtime.sessionUrl,
+    );
+    const response = await fetch(eventsUrl, {
+      headers: { origin: runtime.surfaceUrl.origin },
+    });
+    const reader = response.body?.getReader();
+    if (reader === undefined) throw new Error('SSE response body is absent.');
+
+    await writeFile(join(repository.path, 'external.txt'), 'changed\n');
+    const frame = await readFrameWithin(reader, 2_000);
+
+    expect(frame).toContain('event: invalidation');
+    expect(frame).toMatch(/"kind":"repository_revision"/u);
+    await reader.cancel();
+  });
 });
+
+async function readFrameWithin(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  milliseconds: number,
+): Promise<string> {
+  const decoder = new TextDecoder();
+  let content = '';
+  const deadline = new Promise<never>((_, reject) =>
+    setTimeout(
+      () => reject(new Error('Timed out waiting for an SSE invalidation.')),
+      milliseconds,
+    ),
+  );
+  while (!content.includes('\n\n')) {
+    const next = await Promise.race([reader.read(), deadline]);
+    if (next.done) throw new Error('SSE stream closed before invalidation.');
+    content += decoder.decode(next.value, { stream: true });
+  }
+  return content;
+}

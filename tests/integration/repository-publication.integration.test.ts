@@ -2,6 +2,7 @@ import {
   access,
   chmod,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   writeFile,
@@ -123,6 +124,35 @@ describe('Repository snapshot publication', () => {
     await session.close();
   });
 
+  it('publishes a selected Worktree change without a manual snapshot request', async () => {
+    const repository = await createRepositoryWithCommit();
+    const session = await createRepositoryEngine().open(
+      asAbsolutePath(repository.path),
+    );
+    const initial = await snapshotRepository(session);
+    const events = session.subscribe()[Symbol.asyncIterator]();
+
+    await writeFile(
+      join(repository.path, 'automatic-refresh.txt'),
+      'changed\n',
+    );
+
+    const event = await nextEventWithin(events, 2_000);
+    expect(event).toMatchObject({
+      done: false,
+      value: {
+        kind: 'repository',
+        repositoryRevision: initial.repositoryRevision + 1,
+      },
+    });
+    const refreshed = await snapshotRepository(session);
+    expect(refreshed.worktrees[0]).toMatchObject({
+      worktreeRevision: initial.worktrees[0]!.worktreeRevision + 1,
+      status: { untracked: 1 },
+    });
+    await session.close();
+  });
+
   it('does not publish or notify a superseded snapshot that completes late', async () => {
     const repository = await createRepositoryWithCommit();
     const session = await createRepositoryEngine().open(
@@ -164,7 +194,6 @@ describe('Repository snapshot publication', () => {
         },
       });
 
-      await writeFile(release, 'continue\n');
       const late = await older;
       expect(late).toEqual({ kind: 'repository', repository: newer });
       await expect(noEvent(events)).resolves.toBe(true);
@@ -178,6 +207,55 @@ describe('Repository snapshot publication', () => {
       delete process.env.CODEX_GIT_PUBLICATION_MARKER;
       delete process.env.CODEX_GIT_PUBLICATION_RELEASE;
       delete process.env.CODEX_GIT_PUBLICATION_OUTPUT;
+      await session.close();
+    }
+  });
+
+  it('deduplicates equivalent discovery reads across overlapping Refresh generations', async () => {
+    const repository = await createRepositoryWithCommit();
+    const session = await createRepositoryEngine().open(
+      asAbsolutePath(repository.path),
+    );
+    await snapshotRepository(session);
+    const directory = await mkdtemp(join(tmpdir(), 'codex-git-dedup-read-'));
+    externalPaths.push(directory);
+    const calls = join(directory, 'calls');
+    const release = join(directory, 'release');
+    const wrapper = join(directory, 'git');
+    await writeFile(
+      wrapper,
+      [
+        '#!/bin/sh',
+        'if [ "$1" = "--git-dir" ] && [ "$3" = "worktree" ]; then',
+        '  printf "call\\n" >> "$CODEX_GIT_DEDUP_CALLS"',
+        '  while [ ! -e "$CODEX_GIT_DEDUP_RELEASE" ]; do sleep 0.01; done',
+        'fi',
+        'exec /usr/bin/git "$@"',
+        '',
+      ].join('\n'),
+    );
+    await chmod(wrapper, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${directory}:${previousPath ?? ''}`;
+    process.env.CODEX_GIT_DEDUP_CALLS = calls;
+    process.env.CODEX_GIT_DEDUP_RELEASE = release;
+
+    try {
+      const first = session.requestRefresh();
+      await waitForPath(calls);
+      const second = session.requestRefresh();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect((await readFile(calls, 'utf8')).trim().split('\n')).toHaveLength(
+        1,
+      );
+      await writeFile(release, 'continue\n');
+      await Promise.all([first, second]);
+    } finally {
+      await writeFile(release, 'continue\n');
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      delete process.env.CODEX_GIT_DEDUP_CALLS;
+      delete process.env.CODEX_GIT_DEDUP_RELEASE;
       await session.close();
     }
   });
@@ -208,7 +286,6 @@ describe('Repository snapshot publication', () => {
         done: true,
         value: undefined,
       });
-      await writeFile(release, 'continue\n');
       const failure: unknown = await inFlight.catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(RepositorySessionFailure);
       expect(failure).toMatchObject({
@@ -423,4 +500,20 @@ async function noEvent(events: AsyncIterator<unknown>): Promise<boolean> {
     await events.return?.();
   }
   return empty;
+}
+
+async function nextEventWithin(
+  events: AsyncIterator<unknown>,
+  milliseconds: number,
+): Promise<IteratorResult<unknown>> {
+  return Promise.race([
+    events.next(),
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () =>
+          reject(new Error('Timed out waiting for Repository invalidation.')),
+        milliseconds,
+      ),
+    ),
+  ]);
 }

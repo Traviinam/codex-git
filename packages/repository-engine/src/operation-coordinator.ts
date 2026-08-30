@@ -1,9 +1,6 @@
 import {
-  createOpaqueIdAuthority,
-  operationResultSchema,
   remoteIdSchema,
   worktreeGenerationSchema,
-  type OperationId,
   type OperationResult,
   type RemoteId,
   type RepositorySnapshot,
@@ -11,7 +8,6 @@ import {
 } from '@codex-git/protocol';
 
 type OperationSummary = RepositorySnapshot['operations'][number];
-type RejectedResult = Extract<OperationResult, { kind: 'rejected' }>;
 type WithoutId<Result> = Result extends OperationResult
   ? Omit<Result, 'operationId'>
   : never;
@@ -21,7 +17,8 @@ export type ReconciledOperationResult = WithoutId<OperationResult>;
 
 export type OperationExecution<Evidence> =
   | { readonly kind: 'returned'; readonly evidence: Evidence }
-  | { readonly kind: 'threw'; readonly error: unknown };
+  | { readonly kind: 'threw'; readonly error: unknown }
+  | { readonly kind: 'timed_out' };
 
 export interface CoordinatedOperationSummary extends OperationSummary {
   readonly retryAllowed: boolean;
@@ -85,188 +82,10 @@ type Target =
 
 export type CoordinatedOperation<Evidence = unknown> = Target & Hooks<Evidence>;
 
-export type OperationAdmission =
-  | {
-      readonly kind: 'accepted';
-      readonly operation: CoordinatedOperationSummary;
-    }
-  | {
-      readonly kind: 'rejected';
-      readonly result: RejectedResult;
-      readonly conflicts: readonly CoordinatedOperationSummary[];
-    };
-
-export interface OperationCoordinator {
-  dispatch<Evidence>(
-    operation: CoordinatedOperation<Evidence>,
-  ): Promise<OperationAdmission>;
-  recover(operationId: OperationId): Promise<OperationResult>;
-}
-
 export interface OperationCoordination {
   readonly category: OperationSummary['category'];
   readonly claims: ReadonlySet<string>;
   readonly lane: string;
-}
-
-interface RecordState extends OperationCoordination {
-  readonly execute: (context: { signal: AbortSignal }) => Promise<unknown>;
-  readonly id: OperationId;
-  readonly reconcile: (
-    context: OperationReconciliationContext<unknown>,
-  ) => Promise<ReconciledOperationResult>;
-  readonly settled: Promise<OperationResult>;
-  readonly settle: (result: OperationResult) => void;
-  execution?: OperationExecution<unknown>;
-  lease: boolean;
-  phase: OperationSummary['phase'];
-  reconciling?: Promise<OperationResult>;
-  result?: OperationResult;
-}
-
-class Coordinator implements OperationCoordinator {
-  readonly #ids = createOpaqueIdAuthority();
-  readonly #operations = new Map<OperationId, RecordState>();
-
-  async dispatch<Evidence>(
-    operation: CoordinatedOperation<Evidence>,
-  ): Promise<OperationAdmission> {
-    const coordination = coordinateOperation(operation);
-    const conflicts = this.#conflicts(coordination);
-
-    const unknown = conflicts.filter(
-      (record) => record.result?.kind === 'unknown_outcome',
-    );
-    for (const record of unknown) void this.#reconcile(record);
-
-    if (conflicts.length > 0) {
-      return this.#rejectBusy(operation, coordination, conflicts);
-    }
-    return this.#admit(operation, coordination);
-  }
-
-  recover(operationId: OperationId): Promise<OperationResult> {
-    const record = this.#operations.get(operationId);
-    if (record === undefined) {
-      throw new Error(
-        'Operation result is not retained by this Repository Session.',
-      );
-    }
-    if (record.result?.kind === 'unknown_outcome') {
-      return this.#reconcile(record);
-    }
-    return record.result === undefined
-      ? record.settled
-      : Promise.resolve(record.result);
-  }
-
-  #admit<Evidence>(
-    operation: CoordinatedOperation<Evidence>,
-    coordination: OperationCoordination,
-  ): OperationAdmission {
-    const record = this.#record(operation, coordination, true, 'running');
-    this.#operations.set(record.id, record);
-    void this.#run(record);
-    return { kind: 'accepted', operation: summary(record) };
-  }
-
-  async #rejectBusy<Evidence>(
-    operation: CoordinatedOperation<Evidence>,
-    coordination: OperationCoordination,
-    conflicts: readonly RecordState[],
-  ): Promise<OperationAdmission> {
-    const conflictSummaries = conflicts.map(summary);
-    await operation.reconcileBusy({ conflicts: conflictSummaries });
-
-    const record = this.#record(operation, coordination, false, 'terminal');
-    const result = withId(record.id, {
-      kind: 'rejected',
-      code: 'busy',
-      message: 'A conflicting operation is active.',
-    }) as RejectedResult;
-    record.result = result;
-    record.settle(result);
-    this.#operations.set(record.id, record);
-    return { kind: 'rejected', result, conflicts: conflictSummaries };
-  }
-
-  async #run(record: RecordState) {
-    try {
-      record.execution = {
-        kind: 'returned',
-        evidence: await record.execute({
-          signal: new AbortController().signal,
-        }),
-      };
-    } catch (error) {
-      record.execution = { kind: 'threw', error };
-    }
-    await this.#reconcile(record);
-  }
-
-  #reconcile(record: RecordState): Promise<OperationResult> {
-    if (record.reconciling !== undefined) return record.reconciling;
-    if (record.execution === undefined) return record.settled;
-
-    record.phase = 'reconciling';
-    const promise = Promise.resolve()
-      .then(() =>
-        record.reconcile({
-          cancellationRequested: false,
-          execution: record.execution as OperationExecution<unknown>,
-          timedOut: false,
-        }),
-      )
-      .then((outcome) => this.#settle(record, outcome))
-      .catch(() => this.#settle(record, unknownOutcome()));
-    record.reconciling = promise;
-    void promise.then(() => {
-      if (record.reconciling === promise) record.reconciling = undefined;
-    });
-    return promise;
-  }
-
-  #settle(record: RecordState, outcome: ReconciledOperationResult) {
-    const result = withId(record.id, outcome);
-    record.phase = 'terminal';
-    record.result = result;
-    record.lease = result.kind === 'unknown_outcome';
-    record.settle(result);
-    return result;
-  }
-
-  #record<Evidence>(
-    operation: CoordinatedOperation<Evidence>,
-    coordination: OperationCoordination,
-    lease: boolean,
-    phase: OperationSummary['phase'],
-  ): RecordState {
-    const done = deferred<OperationResult>();
-    return {
-      ...coordination,
-      execute: (context) => operation.execute(context),
-      id: this.#ids.issue('operation'),
-      lease,
-      phase,
-      reconcile: (context) =>
-        operation.reconcile(
-          context as OperationReconciliationContext<Evidence>,
-        ),
-      settle: done.resolve,
-      settled: done.promise,
-    };
-  }
-
-  #conflicts(candidate: OperationCoordination) {
-    return [...this.#operations.values()].filter(
-      (record) =>
-        record.lease && operationCoordinationConflicts(record, candidate),
-    );
-  }
-}
-
-export function createOperationCoordinator(): OperationCoordinator {
-  return new Coordinator();
 }
 
 export function coordinateOperation(
@@ -454,40 +273,6 @@ function overlaps(left: ReadonlySet<string>, right: ReadonlySet<string>) {
   return false;
 }
 
-function summary(record: RecordState): CoordinatedOperationSummary {
-  return {
-    operationId: record.id,
-    category: record.category,
-    phase: record.phase,
-    progress: null,
-    retryAllowed:
-      record.phase === 'terminal' &&
-      record.result !== undefined &&
-      record.result.kind !== 'unknown_outcome',
-  };
-}
-
-function withId(id: OperationId, outcome: ReconciledOperationResult) {
-  return operationResultSchema.parse({ ...outcome, operationId: id });
-}
-
-function unknownOutcome(): ReconciledOperationResult {
-  return {
-    kind: 'unknown_outcome',
-    code: 'reconciliation_incomplete',
-    message: 'Reconciliation could not establish the operation outcome.',
-    recoveryAvailable: true,
-  };
-}
-
 function key(...parts: readonly string[]) {
   return JSON.stringify(parts);
-}
-
-function deferred<Value>() {
-  let resolve!: (value: Value) => void;
-  const promise = new Promise<Value>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
 }

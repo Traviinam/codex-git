@@ -122,11 +122,14 @@ describe('Repository Engine discovery', () => {
 
     try {
       const snapshot = session.snapshot();
+      const rejectedSnapshot = expect(snapshot).rejects.toThrow(
+        'Repository Session is closed.',
+      );
       await waitForPath(marker);
       await session.close();
       await writeFile(release, 'continue\n');
 
-      await expect(snapshot).rejects.toThrow('Repository Session is closed.');
+      await rejectedSnapshot;
       await expect(session.snapshot()).rejects.toThrow(
         'Repository Session is closed.',
       );

@@ -2,25 +2,21 @@ import type { OperationId, OperationResult } from '@codex-git/protocol';
 
 import {
   createOperationLifecycleStore,
+  systemTimeoutScheduler,
+  validateTimeoutMilliseconds,
   type LifecycleCloseResult,
   type ManagedOperationRecord,
   type OperationLifecycleStore,
+  type TimeoutScheduler,
 } from './operation-lifecycle.js';
-
-interface TimeoutScheduler {
-  schedule(
-    milliseconds: number,
-    onTimeout: () => void,
-  ): {
-    cancel(): void;
-  };
-}
 
 export interface CoordinatorLifecycleRecord extends ManagedOperationRecord {
   readonly abort: AbortController;
   readonly settle: (result: OperationResult) => void;
   readonly settled: Promise<OperationResult>;
+  onTimeout?: () => void;
   cancellationRequested: boolean;
+  operationTimeout?: { cancel(): void };
   reconciling?: Promise<OperationResult>;
   timedOut: boolean;
 }
@@ -30,6 +26,7 @@ export interface CoordinatorLifecycleOptions<
   Summary,
 > {
   readonly closeTimeoutMilliseconds?: number;
+  readonly operationTimeoutMilliseconds?: number;
   readonly publish?: (summary: Summary) => void;
   readonly summarize: (record: Record) => Summary;
   readonly terminalRetention?: number;
@@ -63,10 +60,20 @@ class LifecycleAdapter<
   Record extends CoordinatorLifecycleRecord,
   Summary,
 > implements CoordinatorLifecycle<Record> {
+  readonly #operationTimeout: number | undefined;
   readonly #store: OperationLifecycleStore<Record>;
+  readonly #timeoutScheduler: TimeoutScheduler;
   #closePromise?: Promise<LifecycleCloseResult>;
 
   constructor(options: CoordinatorLifecycleOptions<Record, Summary>) {
+    this.#operationTimeout =
+      options.operationTimeoutMilliseconds === undefined
+        ? undefined
+        : validateTimeoutMilliseconds(
+            options.operationTimeoutMilliseconds,
+            'operationTimeoutMilliseconds',
+          );
+    this.#timeoutScheduler = options.timeoutScheduler ?? systemTimeoutScheduler;
     this.#store = createOperationLifecycleStore({
       closeTimeoutMilliseconds: options.closeTimeoutMilliseconds,
       publish: options.publish,
@@ -86,6 +93,7 @@ class LifecycleAdapter<
     this.#store.publish(record);
     if (!this.open) return 'interrupted' as const;
     record.phase = 'running';
+    this.#armOperationTimeout(record);
     this.#store.publish(record);
     return this.open ? ('running' as const) : ('interrupted' as const);
   }
@@ -180,6 +188,8 @@ class LifecycleAdapter<
 
   settle(record: Record, result: OperationResult) {
     this.#assertOwned(record);
+    record.operationTimeout?.cancel();
+    record.operationTimeout = undefined;
     record.phase = 'terminal';
     record.result = result;
     record.lease = result.kind === 'unknown_outcome';
@@ -195,6 +205,27 @@ class LifecycleAdapter<
     record.cancellationRequested = true;
     record.abort.abort();
     this.#store.publish(record);
+  }
+
+  #armOperationTimeout(record: Record) {
+    if (this.#operationTimeout === undefined) return;
+    let fired = false;
+    const timeout = this.#timeoutScheduler.schedule(
+      this.#operationTimeout,
+      () => {
+        fired = true;
+        record.operationTimeout = undefined;
+        if (record.result !== undefined) return;
+        record.timedOut = true;
+        this.#requestCancellation(record);
+        record.onTimeout?.();
+      },
+    );
+    record.operationTimeout = timeout;
+    if (fired || record.result !== undefined) {
+      timeout.cancel();
+      record.operationTimeout = undefined;
+    }
   }
 
   #assertOwned(record: Record) {
