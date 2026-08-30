@@ -17,11 +17,18 @@ import {
   type WorktreePorcelainRecord,
 } from './worktree-porcelain.js';
 import { createGitEnvironment } from './git-environment.js';
+import { GitReadPolicy } from './git-read-policy.js';
 import { createRepositoryObserver } from './repository-observation.js';
 import {
   createRepositoryPublicationSession,
-  type RepositorySession,
+  type RepositoryRefreshScope,
+  type ScopedRepositoryPublicationSession,
 } from './repository-publication.js';
+import { createRefreshingRepositorySession } from './repository-refresh.js';
+import {
+  createRepositorySession,
+  type RepositorySession,
+} from './repository-session.js';
 import {
   cloneRemoteIdentityState,
   createRemoteIdentityState,
@@ -118,17 +125,26 @@ export function createRepositoryEngine(): RepositoryEngine {
       const state: SessionState = { generation: 0, status: 'open' };
 
       if (resolved === null) {
-        return {
+        const publication: ScopedRepositoryPublicationSession = {
           async snapshot() {
             beginSnapshot(state);
             return { kind: 'not_repository' };
           },
           async *subscribe() {},
+          async requestRefresh() {
+            beginSnapshot(state);
+            return { kind: 'not_repository' } as const;
+          },
+          async requestScopedRefresh() {
+            beginSnapshot(state);
+            return { kind: 'not_repository' } as const;
+          },
           async close() {
             closeSession(state);
             ids.revokeAll();
           },
         };
+        return createRepositorySession(publication);
       }
 
       const identity: RepositoryIdentityState = {
@@ -137,33 +153,61 @@ export function createRepositoryEngine(): RepositoryEngine {
         generations: new Map(),
         remoteIdentity: createRemoteIdentityState(),
       };
-      return createRepositoryPublicationSession({
-        async read() {
+      const reads = new GitReadPolicy(4);
+      let observedDiscovery: RepositoryDiscovery | undefined;
+      const publication = createRepositoryPublicationSession({
+        async read(signal, refreshGeneration, requestedScope) {
           const sessionGeneration = beginSnapshot(state);
           const candidateIdentity: RepositoryIdentityState = {
             ...identity,
             generations: new Map(identity.generations),
             remoteIdentity: cloneRemoteIdentityState(identity.remoteIdentity),
           };
-          const result = await discoverRepository(
-            resolved,
-            candidateIdentity,
-            ids,
-            state,
-            sessionGeneration,
-          );
+          let canReuseTopology = false;
+          let discovery: RepositoryDiscovery;
+          if (
+            requestedScope.kind === 'worktrees' &&
+            observedDiscovery !== undefined
+          ) {
+            canReuseTopology = true;
+            discovery = observedDiscovery;
+          } else {
+            discovery = (
+              await discoverRepository(
+                resolved,
+                candidateIdentity,
+                ids,
+                state,
+                sessionGeneration,
+                signal,
+                reads,
+                refreshGeneration,
+              )
+            ).repository;
+          }
           assertSessionGeneration(state, sessionGeneration);
+          const scope: RepositoryRefreshScope = canReuseTopology
+            ? requestedScope
+            : { kind: 'all' };
+          const worktreeIds =
+            scope.kind === 'all' ? undefined : new Set(scope.worktreeIds);
           const observation = await createRepositoryObserver(
             runGit,
             ids,
             candidateIdentity.remoteIdentity,
-          ).observe(result.repository);
+            4,
+            reads,
+            String(refreshGeneration),
+          ).observe(discovery, signal, worktreeIds);
           assertSessionGeneration(state, sessionGeneration);
           return {
-            discovery: result.repository,
+            discovery,
             observation,
             commit() {
-              identity.generations = candidateIdentity.generations;
+              if (!canReuseTopology) {
+                identity.generations = candidateIdentity.generations;
+                observedDiscovery = discovery;
+              }
               identity.remoteIdentity = candidateIdentity.remoteIdentity;
             },
           };
@@ -179,6 +223,9 @@ export function createRepositoryEngine(): RepositoryEngine {
           ids.revokeAll();
         },
       });
+      return createRefreshingRepositorySession(
+        createRepositorySession(publication),
+      );
     },
   };
 }
@@ -189,6 +236,9 @@ async function discoverRepository(
   ids: OpaqueIdAuthority,
   state: SessionState,
   sessionGeneration: number,
+  signal: AbortSignal,
+  reads: GitReadPolicy,
+  refreshGeneration: number,
 ): Promise<{
   readonly kind: 'repository';
   readonly repository: RepositoryDiscovery;
@@ -200,7 +250,8 @@ async function discoverRepository(
     state,
     sessionGeneration,
   );
-  const inventory = await runGit(
+  const inventory = await runDiscoveryRead(
+    reads,
     [
       '--git-dir',
       resolved.commonGitDirectory,
@@ -210,12 +261,21 @@ async function discoverRepository(
       '-z',
     ],
     true,
+    undefined,
+    signal,
+    refreshGeneration,
   );
   assertSessionGeneration(state, sessionGeneration);
   const records = parseWorktreeListPorcelain(inventory);
   const resolvedRegistrations = await Promise.all(
     records.map((record) =>
-      canonicalizeRegistration(record, resolved.commonGitDirectory),
+      canonicalizeRegistration(
+        record,
+        resolved.commonGitDirectory,
+        signal,
+        reads,
+        refreshGeneration,
+      ),
     ),
   );
   assertSessionGeneration(state, sessionGeneration);
@@ -347,6 +407,9 @@ async function resolveAnchor(
 async function canonicalizeRegistration(
   record: WorktreePorcelainRecord,
   commonGitDirectory: AbsolutePath,
+  signal: AbortSignal,
+  reads: GitReadPolicy,
+  refreshGeneration: number,
 ): Promise<CanonicalRegistration> {
   let canonicalPathBytes: Uint8Array;
   let adminIdentity: string | null = null;
@@ -382,7 +445,8 @@ async function canonicalizeRegistration(
         );
         const gitDirectory = await realpath(
           decodeLine(
-            await runGit(
+            await runDiscoveryRead(
+              reads,
               [
                 '-C',
                 canonicalPath,
@@ -391,12 +455,16 @@ async function canonicalizeRegistration(
                 '--git-dir',
               ],
               false,
+              undefined,
+              signal,
+              refreshGeneration,
             ),
           ),
         );
         const resolvedCommonGitDirectory = await realpath(
           decodeLine(
-            await runGit(
+            await runDiscoveryRead(
+              reads,
               [
                 '-C',
                 canonicalPath,
@@ -405,6 +473,9 @@ async function canonicalizeRegistration(
                 '--git-common-dir',
               ],
               false,
+              undefined,
+              signal,
+              refreshGeneration,
             ),
           ),
         );
@@ -412,7 +483,13 @@ async function canonicalizeRegistration(
           throw new WorktreeRegistrationMismatchError();
         }
         if (gitDirectory !== commonGitDirectory) {
-          await assertWorktreeAdminBacklink(canonicalPathBytes, gitDirectory);
+          await assertWorktreeAdminBacklink(
+            canonicalPathBytes,
+            gitDirectory,
+            signal,
+            reads,
+            refreshGeneration,
+          );
         }
         const gitDirectoryEvidence = fileIdentity(await stat(gitDirectory));
         adminIdentity = `${gitDirectory}\0${gitDirectoryEvidence}`;
@@ -445,9 +522,13 @@ async function canonicalizeRegistration(
 async function assertWorktreeAdminBacklink(
   canonicalPathBytes: Uint8Array,
   gitDirectory: string,
+  signal: AbortSignal,
+  reads: GitReadPolicy,
+  refreshGeneration: number,
 ): Promise<void> {
   const adminControlPath = decodeLine(
-    await runGit(
+    await runDiscoveryRead(
+      reads,
       [
         '--git-dir',
         gitDirectory,
@@ -457,6 +538,9 @@ async function assertWorktreeAdminBacklink(
         'gitdir',
       ],
       false,
+      undefined,
+      signal,
+      refreshGeneration,
     ),
   );
   const backlinkTarget = stripLineEnding(await readFile(adminControlPath));
@@ -621,6 +705,7 @@ function runGit(
   args: readonly string[],
   allowLargeOutput: boolean,
   acceptedEmptyExitCode?: 1,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
   return new Promise((resolvePromise, reject) => {
     execFile(
@@ -630,6 +715,7 @@ function runGit(
         encoding: 'buffer',
         env: createGitEnvironment(),
         maxBuffer: allowLargeOutput ? GIT_OUTPUT_LIMIT_BYTES : 64 * 1_024,
+        signal,
         timeout: GIT_TIMEOUT_MILLISECONDS,
         windowsHide: true,
       },
@@ -653,6 +739,24 @@ function runGit(
       },
     );
   });
+}
+
+function runDiscoveryRead(
+  policy: GitReadPolicy,
+  args: readonly string[],
+  allowLargeOutput: boolean,
+  acceptedEmptyExitCode?: 1,
+  signal?: AbortSignal,
+  refreshGeneration = 0,
+): Promise<Uint8Array> {
+  return policy.run(
+    `${refreshGeneration}:${JSON.stringify([
+      allowLargeOutput,
+      acceptedEmptyExitCode,
+      args,
+    ])}`,
+    () => runGit(args, allowLargeOutput, acceptedEmptyExitCode, signal),
+  );
 }
 
 function beginSnapshot(state: SessionState): number {

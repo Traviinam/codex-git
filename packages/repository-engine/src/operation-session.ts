@@ -163,17 +163,34 @@ class Session implements OperationSession {
 
   async #run(record: SessionRecord) {
     try {
-      record.execution = {
-        kind: 'returned',
-        evidence: await record.execute({ signal: record.abort.signal }),
-      };
+      const evidence = await record.execute({ signal: record.abort.signal });
+      if (
+        record.execution === undefined ||
+        record.execution.kind === 'timed_out'
+      ) {
+        record.execution = { kind: 'returned', evidence };
+      }
     } catch (error) {
-      record.execution = { kind: 'threw', error };
+      if (
+        record.execution === undefined ||
+        record.execution.kind === 'timed_out'
+      ) {
+        record.execution = { kind: 'threw', error };
+      }
     }
     await this.#reconcile(record);
+    if (record.result?.kind === 'unknown_outcome') {
+      await this.#reconcile(record);
+    }
   }
 
   #reconcile(record: SessionRecord) {
+    if (
+      record.result !== undefined &&
+      record.result.kind !== 'unknown_outcome'
+    ) {
+      return Promise.resolve(record.result);
+    }
     if (record.execution === undefined && record.busyConflicts === undefined) {
       return record.settled;
     }
@@ -189,11 +206,20 @@ class Session implements OperationSession {
         message: 'A conflicting operation is active.',
       });
     }
+    const execution = record.execution as OperationExecution<unknown>;
     const outcome = await record.reconcile({
       cancellationRequested: record.cancellationRequested,
-      execution: record.execution as OperationExecution<unknown>,
+      execution,
       timedOut: record.timedOut,
     });
+    if (execution.kind === 'timed_out') {
+      return withId(record.id, {
+        kind: 'unknown_outcome',
+        code: 'reconciliation_incomplete',
+        message: 'The timed-out process has not confirmed termination.',
+        recoveryAvailable: true,
+      });
+    }
     return withId(record.id, outcome);
   }
 
@@ -203,7 +229,7 @@ class Session implements OperationSession {
     lease: boolean,
   ): SessionRecord {
     const done = deferred<OperationResult>();
-    return {
+    const record: SessionRecord = {
       ...coordination,
       abort: new AbortController(),
       cancellationRequested: false,
@@ -220,6 +246,12 @@ class Session implements OperationSession {
       settled: done.promise,
       timedOut: false,
     };
+    record.onTimeout = () => {
+      if (record.execution !== undefined) return;
+      record.execution = { kind: 'timed_out' };
+      void this.#reconcile(record);
+    };
+    return record;
   }
 
   #conflicts(candidate: OperationCoordination) {

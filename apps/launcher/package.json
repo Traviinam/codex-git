@@ -9,6 +9,7 @@
     "@codex-git/host-adapter": "*",
     "@codex-git/host-adapter-codex-cdp": "*",
     "@codex-git/host-adapter-standalone": "*",
+    "@codex-git/repository-engine": "*",
     "@codex-git/server": "*"
   },
   "devDependencies": {

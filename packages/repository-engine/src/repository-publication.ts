@@ -2,11 +2,14 @@ import type { RepositoryDiscovery } from './repository-engine.js';
 import { InvalidationStream } from './invalidation-stream.js';
 import {
   publishObservedFacts,
+  type PrivateRefsEvidence,
   type PublishedObservationWorktree,
   type PublishedRepositoryObservation,
   type WorktreeFreshness,
 } from './observation-publication.js';
 import type { RepositoryObservation } from './repository-observation.js';
+import type { WorktreeId } from '@codex-git/protocol';
+import type { OperationSessionSummary } from './operation-session.js';
 
 export interface RepositorySnapshot
   extends
@@ -16,6 +19,7 @@ export interface RepositorySnapshot
   readonly topologyRevision: number;
   readonly refsRevision: number;
   readonly refresh: RefreshState;
+  readonly operations: readonly OperationSessionSummary[];
 }
 
 export type PublishedWorktreeSnapshot = PublishedObservationWorktree;
@@ -42,17 +46,36 @@ export type RepositoryOpenResult =
       readonly repository: RepositorySnapshot;
     };
 
-export interface RepositorySession {
+export interface RepositoryPublicationSession {
   snapshot(): Promise<RepositoryOpenResult>;
+  requestRefresh(): Promise<RepositoryOpenResult>;
   subscribe(): AsyncIterable<RepositoryInvalidation>;
   close(): Promise<void>;
 }
 
-export interface RepositoryInvalidation {
-  readonly kind: 'repository';
-  readonly repositoryRevision: number;
-  readonly refresh: RefreshState;
+export type RepositoryRefreshScope =
+  | { readonly kind: 'all' }
+  | {
+      readonly kind: 'worktrees';
+      readonly worktreeIds: readonly WorktreeId[];
+    };
+
+export interface ScopedRepositoryPublicationSession extends RepositoryPublicationSession {
+  requestScopedRefresh(
+    scope: RepositoryRefreshScope,
+  ): Promise<RepositoryOpenResult>;
 }
+
+export type RepositoryInvalidation =
+  | {
+      readonly kind: 'repository';
+      readonly repositoryRevision: number;
+      readonly refresh: RefreshState;
+    }
+  | {
+      readonly kind: 'operation';
+      readonly operation: OperationSessionSummary;
+    };
 
 export class RepositorySessionFailure extends Error {
   constructor(readonly code: 'closed' | 'superseded') {
@@ -72,69 +95,39 @@ interface PublicationCandidate {
 }
 
 interface PublicationSessionOptions {
-  read(): Promise<PublicationCandidate>;
+  read(
+    signal: AbortSignal,
+    refreshGeneration: number,
+    scope: RepositoryRefreshScope,
+  ): Promise<PublicationCandidate>;
   canRetainFailure(error: unknown): boolean;
   close(): void;
 }
 
 export function createRepositoryPublicationSession(
   options: PublicationSessionOptions,
-): RepositorySession {
+): ScopedRepositoryPublicationSession {
   const invalidations = new InvalidationStream<RepositoryInvalidation>();
   let closed = false;
   let generation = 0;
   let published: RepositorySnapshot | undefined;
-  let privateRefsEvidence: string | undefined;
+  let privateRefsEvidence: PrivateRefsEvidence | undefined;
+  const activeReads = new Map<number, AbortController>();
 
-  return {
-    async snapshot() {
-      if (closed) {
-        throw new RepositorySessionFailure('closed');
-      }
-      const ownGeneration = ++generation;
-      let candidate: PublicationCandidate;
-      try {
-        candidate = await options.read();
-      } catch (error) {
-        if (closed) {
-          throw new RepositorySessionFailure('closed');
-        }
-        if (ownGeneration !== generation) {
-          if (published === undefined) {
-            throw new RepositorySessionFailure('superseded');
-          }
-          return { kind: 'repository', repository: published };
-        }
-        if (!options.canRetainFailure(error)) {
-          throw error;
-        }
-        const refreshError = classifyRefreshError(error);
-        if (published === undefined) {
-          return {
-            kind: 'failed',
-            refresh: deepFreeze({ kind: 'failed', error: refreshError }),
-          };
-        }
-        const staleRefresh = deepFreeze({
-          kind: 'stale',
-          error: refreshError,
-        } satisfies RefreshState);
-        if (sameExternalState(published.refresh, staleRefresh)) {
-          return { kind: 'repository', repository: published };
-        }
-        const stale = deepFreeze({
-          ...published,
-          repositoryRevision: published.repositoryRevision + 1,
-          refresh: staleRefresh,
-        } satisfies RepositorySnapshot);
-        published = stale;
-        invalidations.publish({
-          kind: 'repository',
-          repositoryRevision: stale.repositoryRevision,
-          refresh: stale.refresh,
-        });
-        return { kind: 'repository', repository: stale };
-      }
+  const readSnapshot = async (
+    scope: RepositoryRefreshScope,
+  ): Promise<RepositoryOpenResult> => {
+    if (closed) {
+      throw new RepositorySessionFailure('closed');
+    }
+    const ownGeneration = ++generation;
+    const controller = new AbortController();
+    activeReads.set(ownGeneration, controller);
+    let candidate: PublicationCandidate;
+    try {
+      candidate = await options.read(controller.signal, ownGeneration, scope);
+    } catch (error) {
+      activeReads.delete(ownGeneration);
       if (closed) {
         throw new RepositorySessionFailure('closed');
       }
@@ -144,25 +137,75 @@ export function createRepositoryPublicationSession(
         }
         return { kind: 'repository', repository: published };
       }
-      const nextCandidate = publishCandidate(
-        candidate.discovery,
-        published,
-        candidate.observation,
-        privateRefsEvidence,
-      );
-      const next = nextCandidate.snapshot;
-      candidate.commit();
-      if (published !== undefined && sameExternalState(published, next)) {
+      if (!options.canRetainFailure(error)) {
+        throw error;
+      }
+      const refreshError = classifyRefreshError(error);
+      if (published === undefined) {
+        return {
+          kind: 'failed',
+          refresh: deepFreeze({ kind: 'failed', error: refreshError }),
+        };
+      }
+      const staleRefresh = deepFreeze({
+        kind: 'stale',
+        error: refreshError,
+      } satisfies RefreshState);
+      if (sameExternalState(published.refresh, staleRefresh)) {
         return { kind: 'repository', repository: published };
       }
-      published = next;
-      privateRefsEvidence = nextCandidate.privateRefsEvidence;
+      const stale = deepFreeze({
+        ...published,
+        repositoryRevision: published.repositoryRevision + 1,
+        refresh: staleRefresh,
+      } satisfies RepositorySnapshot);
+      published = stale;
       invalidations.publish({
         kind: 'repository',
-        repositoryRevision: next.repositoryRevision,
-        refresh: next.refresh,
+        repositoryRevision: stale.repositoryRevision,
+        refresh: stale.refresh,
       });
-      return { kind: 'repository', repository: next };
+      return { kind: 'repository', repository: stale };
+    }
+    activeReads.delete(ownGeneration);
+    if (closed) {
+      throw new RepositorySessionFailure('closed');
+    }
+    if (ownGeneration !== generation) {
+      if (published === undefined) {
+        throw new RepositorySessionFailure('superseded');
+      }
+      return { kind: 'repository', repository: published };
+    }
+    const nextCandidate = publishCandidate(
+      candidate.discovery,
+      published,
+      candidate.observation,
+      privateRefsEvidence,
+    );
+    const next = nextCandidate.snapshot;
+    candidate.commit();
+    abortSupersededReads(activeReads, ownGeneration);
+    if (published !== undefined && sameExternalState(published, next)) {
+      return { kind: 'repository', repository: published };
+    }
+    published = next;
+    privateRefsEvidence = nextCandidate.privateRefsEvidence;
+    invalidations.publish({
+      kind: 'repository',
+      repositoryRevision: next.repositoryRevision,
+      refresh: next.refresh,
+    });
+    return { kind: 'repository', repository: next };
+  };
+
+  return {
+    snapshot: () => readSnapshot({ kind: 'all' }),
+    requestRefresh() {
+      return readSnapshot({ kind: 'all' });
+    },
+    requestScopedRefresh(scope) {
+      return readSnapshot(scope);
     },
     subscribe() {
       return invalidations.subscribe();
@@ -173,10 +216,24 @@ export function createRepositoryPublicationSession(
       }
       closed = true;
       generation += 1;
+      for (const controller of activeReads.values()) controller.abort();
+      activeReads.clear();
       options.close();
       invalidations.close();
     },
   };
+}
+
+function abortSupersededReads(
+  activeReads: Map<number, AbortController>,
+  publishedGeneration: number,
+): void {
+  for (const [readGeneration, controller] of activeReads) {
+    if (readGeneration < publishedGeneration) {
+      controller.abort();
+      activeReads.delete(readGeneration);
+    }
+  }
 }
 
 function classifyRefreshError(error: unknown): RefreshError {
@@ -208,10 +265,10 @@ function publishCandidate(
   discovery: RepositoryDiscovery,
   previous?: RepositorySnapshot,
   observation?: RepositoryObservation,
-  previousPrivateRefsEvidence?: string,
+  previousPrivateRefsEvidence?: PrivateRefsEvidence,
 ): {
   readonly snapshot: RepositorySnapshot;
-  readonly privateRefsEvidence: string;
+  readonly privateRefsEvidence: PrivateRefsEvidence;
 } {
   const {
     refsChanged,
@@ -258,6 +315,7 @@ function publishCandidate(
           ? 1
           : previous.refsRevision + (refsChanged ? 1 : 0),
       refresh: { kind: 'fresh' },
+      operations: previous?.operations ?? [],
       ...publishedObservation,
     }),
   };

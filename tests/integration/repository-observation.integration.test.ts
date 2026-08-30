@@ -207,6 +207,178 @@ describe('Repository observation', () => {
     await session.close();
   });
 
+  it('publishes an effective Upstream with opaque Remote and cached divergence evidence', async () => {
+    const repository = await createRepositoryWithCommit();
+    const branch = (
+      await repository.git('branch', '--show-current')
+    ).stdout.trim();
+    await repository.git(
+      'remote',
+      'add',
+      'origin',
+      'https://user:secret@example.test/team/repository.git',
+    );
+    await repository.git('branch', 'upstream-fixture');
+    await repository.git('switch', '--quiet', 'upstream-fixture');
+    await writeFile(join(repository.path, 'upstream.txt'), 'upstream\n');
+    await repository.git('add', '--', 'upstream.txt');
+    await repository.git('commit', '--quiet', '-m', 'Advance Upstream fixture');
+    const upstreamObjectId = (
+      await repository.git('rev-parse', 'HEAD')
+    ).stdout.trim();
+    await repository.git('switch', '--quiet', branch);
+    await writeFile(join(repository.path, 'local.txt'), 'local\n');
+    await repository.git('add', '--', 'local.txt');
+    await repository.git('commit', '--quiet', '-m', 'Advance Local fixture');
+    await repository.git(
+      'update-ref',
+      `refs/remotes/origin/${branch}`,
+      upstreamObjectId,
+    );
+    await repository.git('config', `branch.${branch}.remote`, 'origin');
+    await repository.git(
+      'config',
+      `branch.${branch}.merge`,
+      `refs/heads/${branch}`,
+    );
+    const session = await createRepositoryEngine().open(
+      repository.path as AbsolutePath,
+    );
+
+    const snapshot = await snapshotRepository(session);
+    const remote = snapshot.remotes[0]!;
+
+    expect(snapshot.worktrees[0]?.upstream).toEqual({
+      kind: 'tracking',
+      remoteId: remote.remoteId,
+      displayName: `origin/${branch}`,
+      ref: {
+        kind: 'remote_tracking',
+        fullName: `refs/remotes/origin/${branch}`,
+        objectId: upstreamObjectId,
+      },
+      aheadBehind: { kind: 'cached', ahead: 1, behind: 1 },
+    });
+    expect(JSON.stringify(snapshot)).not.toMatch(/secret|https:/u);
+    await session.close();
+  });
+
+  it('resolves the effective Upstream of an attached unborn Branch', async () => {
+    const repository = await createTemporaryGitRepository();
+    repositories.push(repository);
+    const branch = (
+      await repository.git('symbolic-ref', '--short', 'HEAD')
+    ).stdout.trim();
+    await repository.git(
+      'remote',
+      'add',
+      'origin',
+      'ssh://git@example.test/team/repository.git',
+    );
+    await repository.git('config', `branch.${branch}.remote`, 'origin');
+    await repository.git(
+      'config',
+      `branch.${branch}.merge`,
+      `refs/heads/${branch}`,
+    );
+    const session = await createRepositoryEngine().open(
+      repository.path as AbsolutePath,
+    );
+
+    const snapshot = await snapshotRepository(session);
+    const worktree = snapshot.worktrees[0]!;
+
+    expect(worktree.head).toMatchObject({
+      kind: 'local_branch',
+      displayName: branch,
+      objectId: null,
+    });
+    expect(worktree.upstream).toEqual({
+      kind: 'tracking',
+      remoteId: snapshot.remotes[0]!.remoteId,
+      displayName: `origin/${branch}`,
+      ref: {
+        kind: 'remote_tracking',
+        fullName: `refs/remotes/origin/${branch}`,
+        objectId: null,
+      },
+      aheadBehind: { kind: 'unavailable' },
+    });
+    await session.close();
+  });
+
+  it('does not treat an unrelated detached Worktree topology change as Upstream evidence', async () => {
+    const repository = await createRepositoryWithCommit();
+    const linkedPath = `${repository.path}-detached-upstream-evidence`;
+    externalPaths.push(linkedPath);
+    const session = await createRepositoryEngine().open(
+      repository.path as AbsolutePath,
+    );
+    const initial = await snapshotRepository(session);
+    const initialMain = initial.worktrees.find(({ role }) => role === 'main')!;
+
+    await repository.git('worktree', 'add', '--quiet', '--detach', linkedPath);
+    const changed = await snapshotRepository(session);
+    const changedMain = changed.worktrees.find(({ role }) => role === 'main')!;
+
+    expect(changed.repositoryRevision).toBe(initial.repositoryRevision + 1);
+    expect(changed.topologyRevision).toBe(initial.topologyRevision + 1);
+    expect(changed.refsRevision).toBe(initial.refsRevision);
+    expect(changedMain.worktreeRevision).toBe(initialMain.worktreeRevision);
+    expect(
+      changed.worktrees.find(({ role }) => role === 'linked')?.upstream,
+    ).toEqual({ kind: 'not_applicable', reason: 'detached_head' });
+    await session.close();
+  });
+
+  it('publishes external Upstream configuration changes only on shared revision axes', async () => {
+    const repository = await createRepositoryWithCommit();
+    const branch = (
+      await repository.git('branch', '--show-current')
+    ).stdout.trim();
+    await repository.git(
+      'remote',
+      'add',
+      'origin',
+      'https://example.test/team/repository.git',
+    );
+    const session = await createRepositoryEngine().open(
+      repository.path as AbsolutePath,
+    );
+    const initial = await snapshotRepository(session);
+    const events = session.subscribe()[Symbol.asyncIterator]();
+    expect(initial.worktrees[0]?.upstream).toEqual({ kind: 'unpublished' });
+
+    await repository.git('config', `branch.${branch}.remote`, 'origin');
+    await repository.git(
+      'config',
+      `branch.${branch}.merge`,
+      `refs/heads/${branch}`,
+    );
+    const changed = await snapshotRepository(session);
+
+    expect(changed.worktrees[0]?.upstream).toMatchObject({
+      kind: 'tracking',
+      remoteId: initial.remotes[0]!.remoteId,
+      displayName: `origin/${branch}`,
+    });
+    expect(changed.repositoryRevision).toBe(initial.repositoryRevision + 1);
+    expect(changed.refsRevision).toBe(initial.refsRevision + 1);
+    expect(changed.topologyRevision).toBe(initial.topologyRevision);
+    expect(changed.worktrees[0]?.worktreeRevision).toBe(
+      initial.worktrees[0]?.worktreeRevision,
+    );
+    await expect(events.next()).resolves.toEqual({
+      done: false,
+      value: {
+        kind: 'repository',
+        repositoryRevision: changed.repositoryRevision,
+        refresh: { kind: 'fresh' },
+      },
+    });
+    await session.close();
+  });
+
   it('versions external Index, status, HEAD, and attached ref changes on their owning axes', async () => {
     const repository = await createRepositoryWithCommit();
     const session = await createRepositoryEngine().open(

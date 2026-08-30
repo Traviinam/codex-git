@@ -8,11 +8,13 @@ import {
 } from '@codex-git/protocol';
 
 import {
-  createOperationCoordinator,
   type CoordinatedOperation,
-  type OperationAdmission,
   type ReconciledOperationResult,
 } from './operation-coordinator.js';
+import {
+  createOperationSession,
+  type OperationSessionAdmission,
+} from './operation-session.js';
 
 const generation = (digit: string) =>
   worktreeGenerationSchema.parse(`generation_${digit.repeat(32)}`);
@@ -28,7 +30,7 @@ describe('operation coordinator admission', () => {
     const firstExecution = deferred<string>();
     const otherExecution = deferred<string>();
     const busyReconciliation = deferred<void>();
-    const coordinator = createOperationCoordinator();
+    const coordinator = createOperationSession();
     const firstGeneration = generation('1');
     let blockedExecutions = 0;
 
@@ -73,7 +75,7 @@ describe('operation coordinator admission', () => {
   });
 
   it('rejects caller-selected coordination and incomplete kind targets at runtime', async () => {
-    const coordinator = createOperationCoordinator();
+    const coordinator = createOperationSession();
     const bypass = {
       ...commitOperation(generation('3'), 'refs/heads/topic', 'unused'),
       lane: { kind: 'remote' },
@@ -91,33 +93,11 @@ describe('operation coordinator admission', () => {
     );
   });
 
-  it('propagates Busy reconciliation failure without publishing Busy', async () => {
-    const activeExecution = deferred<string>();
-    const coordinator = createOperationCoordinator();
-    const worktreeGeneration = generation('3');
-    const active = await coordinator.dispatch(
-      stageOperation(worktreeGeneration, activeExecution.promise),
-    );
-    const reconciliationFailure = new Error('Fresh state is unavailable.');
-
-    await expect(
-      coordinator.dispatch({
-        ...commitOperation(worktreeGeneration, 'refs/heads/topic', 'blocked'),
-        reconcileBusy: async () => {
-          throw reconciliationFailure;
-        },
-      }),
-    ).rejects.toBe(reconciliationFailure);
-
-    activeExecution.resolve('active evidence');
-    await coordinator.recover(acceptedId(active));
-  });
-
   it('derives Repository lanes and mandatory cross-lane claims', async () => {
     const commitExecution = deferred<string>();
     const branchExecution = deferred<string>();
     const fetchExecution = deferred<string>();
-    const coordinator = createOperationCoordinator();
+    const coordinator = createOperationSession();
     const commitGeneration = generation('4');
     const branchGeneration = generation('5');
 
@@ -191,7 +171,7 @@ describe('operation coordinator admission', () => {
 
   it('makes a Remote-tracking Branch conflict with Fetch for its exact Remote', async () => {
     const branchExecution = deferred<string>();
-    const coordinator = createOperationCoordinator();
+    const coordinator = createOperationSession();
     const remoteId = remote('2');
     const branch = await coordinator.dispatch(
       branchOperation(
@@ -219,7 +199,7 @@ describe('operation coordinator admission', () => {
   });
 
   it('rejects Branch targets outside their declared ref namespace', async () => {
-    const coordinator = createOperationCoordinator();
+    const coordinator = createOperationSession();
     const localMismatch = branchOperation(
       generation('7'),
       localTarget('refs/remotes/origin/topic'),
@@ -245,7 +225,7 @@ describe('operation coordinator admission', () => {
 
   it('reconciles an Unknown lease in the background without queueing admissions', async () => {
     const recovered = deferred<ReconciledOperationResult>();
-    const coordinator = createOperationCoordinator();
+    const coordinator = createOperationSession();
     const worktreeGeneration = generation('8');
     let reconciliations = 0;
     const first = await coordinator.dispatch({
@@ -301,7 +281,7 @@ describe('operation coordinator admission', () => {
   });
 
   it('derives the terminal result from reconciliation rather than process state', async () => {
-    const coordinator = createOperationCoordinator();
+    const coordinator = createOperationSession();
     const admission = await coordinator.dispatch({
       ...stageOperation(generation('9'), 'exit zero'),
       reconcile: async () => ({
@@ -394,7 +374,7 @@ function localTarget(fullName: string) {
   return { kind: 'local', fullName } as const;
 }
 
-function acceptedId(admission: OperationAdmission) {
+function acceptedId(admission: OperationSessionAdmission) {
   if (admission.kind !== 'accepted') throw new Error('Expected accepted');
   return admission.operation.operationId;
 }

@@ -351,6 +351,79 @@ describe('operation session', () => {
     });
   });
 
+  it('times out each admitted operation and reconciles before enabling retry', async () => {
+    const timeout = controlledTimeout();
+    const contexts: OperationReconciliationContext<string>[] = [];
+    const published: OperationSessionSummary[] = [];
+    const session = createOperationSession({
+      operationTimeoutMilliseconds: 75,
+      publish: (summary) => published.push(summary),
+      timeoutScheduler: timeout.scheduler,
+    });
+    let executionSignal: AbortSignal | undefined;
+    const lateExecution = deferred<string>();
+    const admission = await session.dispatch({
+      ...stageOperation(generation('a'), 'unused'),
+      execute: ({ signal }) => {
+        executionSignal = signal;
+        return lateExecution.promise;
+      },
+      reconcile: async (context) => {
+        contexts.push(context);
+        return {
+          kind: 'failed_known',
+          code: 'process_failed',
+          message: 'Timeout was reconciled from fresh state.',
+        };
+      },
+    });
+    const operationId = acceptedId(admission);
+
+    expect(timeout.delay).toBe(75);
+    timeout.trigger();
+    expect(executionSignal?.aborted).toBe(true);
+    expect(published.at(-1)).toMatchObject({
+      cancellationRequested: true,
+      phase: 'reconciling',
+      retryAllowed: false,
+      timedOut: true,
+    });
+
+    await expect(session.recover(operationId)).resolves.toMatchObject({
+      kind: 'unknown_outcome',
+      code: 'reconciliation_incomplete',
+    });
+    expect(contexts).toEqual([
+      {
+        cancellationRequested: true,
+        execution: { kind: 'timed_out' },
+        timedOut: true,
+      },
+    ]);
+    expect(published.at(-1)).toMatchObject({
+      cancellationRequested: true,
+      phase: 'terminal',
+      retryAllowed: false,
+      timedOut: true,
+    });
+    const publicationsAtTimeout = published.length;
+    lateExecution.resolve('late evidence');
+    await until(() => published.length > publicationsAtTimeout);
+    await expect(session.recover(operationId)).resolves.toMatchObject({
+      kind: 'failed_known',
+      code: 'process_failed',
+    });
+    expect(contexts.at(-1)).toEqual({
+      cancellationRequested: true,
+      execution: { kind: 'returned', evidence: 'late evidence' },
+      timedOut: true,
+    });
+    expect(published.at(-1)).toMatchObject({
+      phase: 'terminal',
+      retryAllowed: true,
+    });
+  });
+
   it('drains on close despite publication failure and reentrancy', async () => {
     let reentrantClose:
       | ReturnType<ReturnType<typeof createOperationSession>['close']>
@@ -557,12 +630,17 @@ function deferred<Value>() {
 function controlledTimeout() {
   let callback: (() => void) | undefined;
   let cancellations = 0;
+  let delay: number | undefined;
   return {
     get cancellations() {
       return cancellations;
     },
+    get delay() {
+      return delay;
+    },
     scheduler: {
-      schedule(_milliseconds: number, onTimeout: () => void) {
+      schedule(milliseconds: number, onTimeout: () => void) {
+        delay = milliseconds;
         callback = onTimeout;
         return {
           cancel() {

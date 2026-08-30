@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto';
 import { access } from 'node:fs/promises';
 
-import type { OpaqueIdAuthority } from '@codex-git/protocol';
+import type {
+  OpaqueIdAuthority,
+  RemoteId,
+  WorktreeId,
+} from '@codex-git/protocol';
 
 import { GitReadPolicy, runSelectedFirst } from './git-read-policy.js';
 import type {
@@ -45,8 +49,33 @@ export interface WorktreeStatusSummary {
   readonly untracked: number;
 }
 
+export type UpstreamSnapshot =
+  | {
+      readonly kind: 'tracking';
+      readonly remoteId: RemoteId;
+      readonly displayName: string;
+      readonly ref: {
+        readonly kind: 'remote_tracking';
+        readonly fullName: string;
+        readonly objectId: string | null;
+      };
+      readonly aheadBehind:
+        | {
+            readonly kind: 'cached';
+            readonly ahead: number;
+            readonly behind: number;
+          }
+        | { readonly kind: 'unavailable' };
+    }
+  | { readonly kind: 'unpublished' }
+  | {
+      readonly kind: 'not_applicable';
+      readonly reason: 'detached_head' | 'unsupported_upstream';
+    }
+  | { readonly kind: 'unavailable' };
+
 export interface WorktreeObservationError {
-  readonly code: 'git_read_failed' | 'git_output_too_large';
+  readonly code: 'git_read_failed' | 'git_output_too_large' | 'not_observed';
   readonly message: string;
 }
 
@@ -57,6 +86,7 @@ export type WorktreeObservation =
       readonly head: DiscoveredHead;
       readonly index: IndexSnapshot;
       readonly status: WorktreeStatusSummary;
+      readonly upstream: UpstreamSnapshot;
     }
   | {
       readonly kind: 'unavailable';
@@ -71,16 +101,22 @@ export type WorktreeObservation =
 export interface RepositoryObservation {
   readonly shared: SharedRepositoryObservation;
   readonly worktrees: readonly WorktreeObservation[];
+  readonly complete?: boolean;
 }
 
 export type GitReader = (
   args: readonly string[],
   allowLargeOutput: boolean,
   acceptedEmptyExitCode?: 1,
+  signal?: AbortSignal,
 ) => Promise<Uint8Array>;
 
 export interface RepositoryObserver {
-  observe(discovery: RepositoryDiscovery): Promise<RepositoryObservation>;
+  observe(
+    discovery: RepositoryDiscovery,
+    signal?: AbortSignal,
+    worktreeIds?: ReadonlySet<WorktreeId>,
+  ): Promise<RepositoryObservation>;
 }
 
 export function createRepositoryObserver(
@@ -88,23 +124,43 @@ export function createRepositoryObserver(
   ids: OpaqueIdAuthority,
   remoteIdentity: RemoteIdentityState,
   maximumConcurrency = DEFAULT_GIT_READ_CONCURRENCY,
+  readPolicy?: GitReadPolicy,
+  readNamespace = '',
 ): RepositoryObserver {
-  const reads = new GitReadPolicy(maximumConcurrency);
+  const reads = readPolicy ?? new GitReadPolicy(maximumConcurrency);
+  let observationGeneration = 0;
 
   return {
-    async observe(discovery) {
+    async observe(discovery, signal, worktreeIds) {
+      const readKeyPrefix = `${readNamespace}:${(observationGeneration += 1)}:`;
       let sharedBefore = await observeShared(
         discovery,
         reads,
         readGit,
         ids,
         remoteIdentity,
+        readKeyPrefix,
+        signal,
       );
       for (let attempt = 0; attempt < MAX_COHERENCE_ATTEMPTS; attempt += 1) {
+        const selectedWorktrees =
+          worktreeIds === undefined
+            ? discovery.worktrees
+            : discovery.worktrees.filter(({ worktreeId }) =>
+                worktreeIds.has(worktreeId),
+              );
         const worktrees = await runSelectedFirst(
-          discovery.worktrees,
+          selectedWorktrees,
           ({ worktreeId }) => worktreeId === discovery.selectedWorktreeId,
-          (worktree) => observeWorktree(worktree, reads, readGit),
+          (worktree) =>
+            observeWorktree(
+              worktree,
+              sharedBefore,
+              reads,
+              readGit,
+              readKeyPrefix,
+              signal,
+            ),
         );
         const sharedAfter = await observeShared(
           discovery,
@@ -112,9 +168,15 @@ export function createRepositoryObserver(
           readGit,
           ids,
           remoteIdentity,
+          readKeyPrefix,
+          signal,
         );
         if (sameSharedObservation(sharedBefore, sharedAfter)) {
-          return { shared: sharedAfter, worktrees };
+          return {
+            shared: sharedAfter,
+            worktrees,
+            complete: worktreeIds === undefined,
+          };
         }
         sharedBefore = sharedAfter;
       }
@@ -131,6 +193,8 @@ async function observeShared(
   readGit: GitReader,
   ids: OpaqueIdAuthority,
   remoteIdentity: RemoteIdentityState,
+  readKeyPrefix: string,
+  signal?: AbortSignal,
 ): Promise<SharedRepositoryObservation> {
   const contextArgs = remoteContext(discovery);
   const [refsOutput, remoteObservation] = await Promise.all([
@@ -146,11 +210,22 @@ async function observeShared(
         'refs/remotes',
       ],
       true,
+      undefined,
+      readKeyPrefix,
+      signal,
     ),
     observeRemotes(
       contextArgs,
       (args, allowLargeOutput, acceptedEmptyExitCode) =>
-        runRead(reads, readGit, args, allowLargeOutput, acceptedEmptyExitCode),
+        runRead(
+          reads,
+          readGit,
+          args,
+          allowLargeOutput,
+          acceptedEmptyExitCode,
+          readKeyPrefix,
+          signal,
+        ),
       remoteIdentity,
       ids,
     ),
@@ -186,8 +261,11 @@ function remoteContext(discovery: RepositoryDiscovery): readonly string[] {
 
 async function observeWorktree(
   worktree: DiscoveredWorktree,
+  shared: SharedRepositoryObservation,
   reads: GitReadPolicy,
   readGit: GitReader,
+  readKeyPrefix: string,
+  signal?: AbortSignal,
 ): Promise<WorktreeObservation> {
   if (
     worktree.availability.kind === 'unavailable' ||
@@ -201,6 +279,8 @@ async function observeWorktree(
       worktree.canonicalPath,
       reads,
       readGit,
+      readKeyPrefix,
+      signal,
     );
     const indexPathOutput = await runRead(
       reads,
@@ -214,6 +294,9 @@ async function observeWorktree(
         'index',
       ],
       false,
+      undefined,
+      readKeyPrefix,
+      signal,
     );
     const observed = summarizeStatus(statusOutput, worktree.head);
     const indexPath = decodeLine(indexPathOutput);
@@ -228,6 +311,7 @@ async function observeWorktree(
         locked: await pathExists(`${indexPath}.lock`),
       },
       status: observed.status,
+      upstream: resolveUpstream(observed.upstream, shared),
     };
   } catch (error) {
     return {
@@ -242,6 +326,8 @@ async function readCoherentWorktree(
   canonicalPath: NonNullable<DiscoveredWorktree['canonicalPath']>,
   reads: GitReadPolicy,
   readGit: GitReader,
+  readKeyPrefix: string,
+  signal?: AbortSignal,
 ): Promise<{
   readonly indexOutput: Uint8Array;
   readonly statusOutput: Uint8Array;
@@ -252,6 +338,9 @@ async function readCoherentWorktree(
       readGit,
       ['-C', canonicalPath, 'ls-files', '--stage', '-z'],
       true,
+      undefined,
+      readKeyPrefix,
+      signal,
     );
     const statusOutput = await runRead(
       reads,
@@ -267,12 +356,18 @@ async function readCoherentWorktree(
         '--untracked-files=all',
       ],
       true,
+      undefined,
+      readKeyPrefix,
+      signal,
     );
     const indexAfter = await runRead(
       reads,
       readGit,
       ['-C', canonicalPath, 'ls-files', '--stage', '-z'],
       true,
+      undefined,
+      readKeyPrefix,
+      signal,
     );
     if (Buffer.from(indexBefore).equals(Buffer.from(indexAfter))) {
       return { indexOutput: indexAfter, statusOutput };
@@ -287,10 +382,16 @@ function runRead(
   args: readonly string[],
   allowLargeOutput: boolean,
   acceptedEmptyExitCode?: 1,
+  readKeyPrefix = '',
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
   return policy.run(
-    JSON.stringify([allowLargeOutput, acceptedEmptyExitCode, args]),
-    async () => readGit(args, allowLargeOutput, acceptedEmptyExitCode),
+    `${readKeyPrefix}${JSON.stringify([
+      allowLargeOutput,
+      acceptedEmptyExitCode,
+      args,
+    ])}`,
+    async () => readGit(args, allowLargeOutput, acceptedEmptyExitCode, signal),
   );
 }
 
@@ -317,9 +418,16 @@ function parseRefs(output: Uint8Array): readonly RefSnapshot[] {
 function summarizeStatus(
   output: Uint8Array,
   fallbackHead: DiscoveredHead,
-): { readonly head: DiscoveredHead; readonly status: WorktreeStatusSummary } {
+): {
+  readonly head: DiscoveredHead;
+  readonly status: WorktreeStatusSummary;
+  readonly upstream: ObservedUpstream;
+} {
   let branchHead: string | undefined;
   let branchObjectId: string | undefined;
+  let branchUpstream: string | undefined;
+  let branchAheadBehind:
+    { readonly ahead: number; readonly behind: number } | undefined;
   let conflicted = 0;
   let staged = 0;
   let unstaged = 0;
@@ -336,6 +444,17 @@ function summarizeStatus(
         branchHead = header.slice('# branch.head '.length);
       } else if (header.startsWith('# branch.oid ')) {
         branchObjectId = header.slice('# branch.oid '.length);
+      } else if (header.startsWith('# branch.upstream ')) {
+        branchUpstream = header.slice('# branch.upstream '.length);
+      } else if (header.startsWith('# branch.ab ')) {
+        const match = /^# branch\.ab \+(\d+) -(\d+)$/u.exec(header);
+        if (match === null) {
+          throw new Error('Git status returned invalid Upstream divergence.');
+        }
+        branchAheadBehind = {
+          ahead: Number(match[1]),
+          behind: Number(match[2]),
+        };
       }
       continue;
     }
@@ -367,6 +486,67 @@ function summarizeStatus(
       unstaged,
       untracked,
     },
+    upstream:
+      branchHead === '(detached)'
+        ? { kind: 'detached' }
+        : branchUpstream === undefined
+          ? { kind: 'unpublished' }
+          : {
+              kind: 'configured',
+              displayName: branchUpstream,
+              aheadBehind: branchAheadBehind,
+            },
+  };
+}
+
+type ObservedUpstream =
+  | { readonly kind: 'detached' }
+  | { readonly kind: 'unpublished' }
+  | {
+      readonly kind: 'configured';
+      readonly displayName: string;
+      readonly aheadBehind?: {
+        readonly ahead: number;
+        readonly behind: number;
+      };
+    };
+
+function resolveUpstream(
+  observed: ObservedUpstream,
+  shared: SharedRepositoryObservation,
+): UpstreamSnapshot {
+  if (observed.kind === 'detached') {
+    return { kind: 'not_applicable', reason: 'detached_head' };
+  }
+  if (observed.kind === 'unpublished') {
+    return { kind: 'unpublished' };
+  }
+  const remote = [...shared.remotes]
+    .sort((left, right) => right.displayName.length - left.displayName.length)
+    .find(({ displayName }) =>
+      observed.displayName.startsWith(`${displayName}/`),
+    );
+  if (remote === undefined) {
+    return { kind: 'not_applicable', reason: 'unsupported_upstream' };
+  }
+  const fullName = `refs/remotes/${observed.displayName}`;
+  const ref = shared.refs.find(
+    (candidate) =>
+      candidate.kind === 'remote_tracking' && candidate.fullName === fullName,
+  );
+  return {
+    kind: 'tracking',
+    remoteId: remote.remoteId,
+    displayName: observed.displayName,
+    ref: {
+      kind: 'remote_tracking',
+      fullName,
+      objectId: ref?.objectId ?? null,
+    },
+    aheadBehind:
+      observed.aheadBehind === undefined
+        ? { kind: 'unavailable' }
+        : { kind: 'cached', ...observed.aheadBehind },
   };
 }
 
