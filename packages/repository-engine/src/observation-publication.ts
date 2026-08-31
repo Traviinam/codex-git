@@ -29,6 +29,7 @@ export interface PublishedObservationWorktree extends Omit<
   DiscoveredWorktree,
   'canonicalPathBytes' | 'privateIdentityEvidence'
 > {
+  readonly nativeTargetId: NativeTargetId;
   readonly [privateWorktreeIdentityEvidence]?: string;
   readonly worktreeRevision: number;
   readonly freshness: WorktreeFreshness;
@@ -111,7 +112,7 @@ export function publishObservedFacts(
         : publishWorktreeObservation(worktree, observed, prior);
     const candidate: Omit<
       PublishedObservationWorktree,
-      'worktreeRevision' | 'changes'
+      'nativeTargetId' | 'worktreeRevision' | 'changes'
     > & { readonly changes: readonly ChangedFileObservation[] } = {
       worktreeId: worktree.worktreeId,
       generation: worktree.generation,
@@ -144,6 +145,10 @@ export function publishObservedFacts(
           );
     return {
       ...candidate,
+      nativeTargetId:
+        prior?.generation === worktree.generation
+          ? prior.nativeTargetId
+          : requireNativeTargetIdIssuer(issueNativeTargetId)(),
       changes,
       worktreeRevision:
         prior === undefined ? 1 : prior.worktreeRevision + (changed ? 1 : 0),

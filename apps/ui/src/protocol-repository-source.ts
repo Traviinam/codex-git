@@ -287,7 +287,49 @@ export function createProtocolRepositorySource(
       await requestSnapshot();
       return result;
     },
+    async requestRemoteOperation(request) {
+      const command: ProductCommand =
+        request.kind === 'publish'
+          ? {
+              kind: request.kind,
+              worktreeId: request.worktreeId,
+              expectedWorktreeRevision: request.expectedWorktreeRevision,
+              expectedRefsRevision: request.expectedRefsRevision,
+              remoteId: requirePublishRemote(request.remoteId),
+            }
+          : {
+              kind: request.kind,
+              worktreeId: request.worktreeId,
+              expectedWorktreeRevision: request.expectedWorktreeRevision,
+              expectedRefsRevision: request.expectedRefsRevision,
+            };
+      const submitted = await protocolPost(
+        fetcher,
+        endpointUrl(options.sessionUrl, 'commands'),
+        { clientCommandId: createClientCommandId(), command },
+      );
+      if (!submitted.ok) throw new Error('Remote operation submission failed.');
+      const receipt = operationReceiptSchema.parse(await submitted.json());
+      const recovery = await protocolPost(
+        fetcher,
+        endpointUrl(options.sessionUrl, 'operations'),
+        { operationId: receipt.operationId },
+      );
+      if (!recovery.ok) throw new Error('Remote operation recovery failed.');
+      const result = operationResultSchema.parse(await recovery.json());
+      await requestSnapshot();
+      return result;
+    },
   };
+}
+
+function requirePublishRemote(
+  remoteId: import('@codex-git/protocol').RemoteId | undefined,
+) {
+  if (remoteId === undefined) {
+    throw new Error('Publish requires an exact Remote target.');
+  }
+  return remoteId;
 }
 
 function requiresSnapshot(

@@ -112,6 +112,11 @@ function createMutableFixture(
       async switchBranch() {
         throw new Error('Branch switching is not configured for this fixture.');
       },
+      async requestRemoteOperation() {
+        throw new Error(
+          'Remote operations are not configured for this fixture.',
+        );
+      },
     },
     publish(nextState) {
       state = nextState;
@@ -144,6 +149,9 @@ const changedFileIds = [1, 2, 3, 4].map((index) =>
 const changedNativeTargetIds = [1, 2, 3, 4].map((index) =>
   nativeTargetIdSchema.parse(`native_${index.toString(16).padStart(32, '0')}`),
 );
+const worktreeNativeTargetId = nativeTargetIdSchema.parse(
+  'native_00000000000000000000000000000010',
+);
 
 export const oneWorktree: RepositoryOverviewSnapshot = {
   repositoryId,
@@ -172,6 +180,9 @@ export const oneWorktree: RepositoryOverviewSnapshot = {
       },
       status: { kind: 'clean' },
       changes: [],
+      nativeTargets: [
+        { targetId: worktreeNativeTargetId, actions: ['open_terminal'] },
+      ],
       upstream: {
         kind: 'tracking',
         displayName: 'origin/main',
@@ -281,6 +292,14 @@ const linkedWorktrees: RepositoryOverviewSnapshot['worktrees'] = Array.from(
             }
           : { kind: 'clean' as const },
       changes: [],
+      nativeTargets: [
+        {
+          targetId: nativeTargetIdSchema.parse(
+            `native_${(index + 16).toString(16).padStart(32, '0')}`,
+          ),
+          actions: ['open_terminal'] as const,
+        },
+      ],
       upstream: {
         kind: 'tracking' as const,
         displayName: `origin/feat/${displayName}`,

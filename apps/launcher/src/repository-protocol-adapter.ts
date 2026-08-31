@@ -119,7 +119,12 @@ function worktree(source: PublishedWorktreeSnapshot, fetchedAt: string | null) {
         nativeTargets: [nativeFileTarget(source, nativeTargetId, fileId)],
       }),
     ),
-    nativeTargets: [],
+    nativeTargets: [
+      {
+        targetId: source.nativeTargetId,
+        actions: ['open_terminal'] as const,
+      },
+    ],
   };
 }
 

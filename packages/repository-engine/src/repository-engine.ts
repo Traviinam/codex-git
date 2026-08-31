@@ -32,6 +32,7 @@ import {
   type RepositorySession,
 } from './repository-session.js';
 import { createRemoteFetcher } from './remote-fetch.js';
+import { createRemoteOperationExecutor } from './remote-operation.js';
 import {
   cloneRemoteIdentityState,
   createRemoteIdentityState,
@@ -42,6 +43,7 @@ const GIT_OUTPUT_LIMIT_BYTES = 4 * 1_024 * 1_024;
 const GIT_TIMEOUT_MILLISECONDS = 10_000;
 const ZERO_OBJECT_ID = /^(?:0{40}|0{64})$/u;
 const fetchRemote = createRemoteFetcher();
+const executeRemoteOperation = createRemoteOperationExecutor();
 
 export interface RepositoryDiscovery {
   readonly repositoryId: RepositoryId;
@@ -238,6 +240,7 @@ export function createRepositoryEngine(): RepositoryEngine {
             readChangedFileDiff(worktree, fileId, runGit),
           inspectFileMutationTargets: createFileMutationInspector(runGit),
           runGit,
+          executeRemoteOperation,
         }),
       );
     },

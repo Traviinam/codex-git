@@ -6,6 +6,39 @@ import type { RepositoryOverviewSource } from './repository-overview-model.js';
 import { createRepositoryStore } from './repository-store.js';
 
 describe('RepositoryStore lifecycle', () => {
+  it('submits Push with the selected Worktree and observed revisions', async () => {
+    const fixture = createOverviewFixture('one-worktree');
+    const requestRemoteOperation = vi.fn(async () => ({
+      kind: 'succeeded' as const,
+      operationId: operationIdSchema.parse(
+        'operation_00000000000000000000000000000001',
+      ),
+      result: { kind: 'no_change' as const },
+    }));
+    const store = createRepositoryStore({
+      ...fixture.source,
+      requestRemoteOperation,
+    });
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository') throw new Error('Expected Repository');
+    const worktree = current.snapshot.worktrees[0]!;
+
+    store.push();
+    await vi.waitFor(() => expect(requestRemoteOperation).toHaveBeenCalled());
+
+    expect(requestRemoteOperation).toHaveBeenCalledWith({
+      kind: 'push',
+      worktreeId: worktree.worktreeId,
+      expectedWorktreeRevision: worktree.worktreeRevision,
+      expectedRefsRevision: current.snapshot.refsRevision,
+      remoteId: undefined,
+    });
+    expect(store.getSnapshot().remoteOperation).toMatchObject({
+      kind: 'result',
+      result: { kind: 'succeeded', result: { kind: 'no_change' } },
+    });
+  });
+
   it('ignores a late Diff after a newer file is selected', async () => {
     const fixture = createOverviewFixture('changed-worktree');
     const pending = new Map<string, (value: never) => void>();

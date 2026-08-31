@@ -81,7 +81,7 @@ export async function startStandaloneRuntime(
           : {
               diff: ({ fileId }) => repositorySession!.diff(fileId),
               nativeActions: (request) =>
-                performFileNativeAction(repositorySession!, request),
+                performNativeAction(repositorySession!, request),
               branchSearch: (request) =>
                 repositorySession!.searchBranches(request),
               snapshot: async () =>
@@ -156,7 +156,12 @@ async function dispatchRepositoryCommand(
   session: RepositorySession,
   request: CommandEnvelope,
 ): Promise<OperationReceipt> {
-  if (request.command.kind === 'switch_branch') {
+  if (
+    request.command.kind === 'switch_branch' ||
+    request.command.kind === 'pull' ||
+    request.command.kind === 'push' ||
+    request.command.kind === 'publish'
+  ) {
     return session.dispatch(request);
   }
   if (
@@ -184,10 +189,36 @@ async function dispatchRepositoryCommand(
   };
 }
 
-async function performFileNativeAction(
+async function performNativeAction(
   session: RepositorySession,
   request: NativeActionRequest,
 ): Promise<NativeActionResult> {
+  if (request.kind === 'open_terminal') {
+    try {
+      const target = await session.resolveWorktreeNativeTarget(
+        request.targetId,
+      );
+      const metadata = await lstat(target.worktreePath);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+        throw new Error('The Worktree target is not a directory.');
+      }
+      const resolvedWorktree = await realpath(target.worktreePath);
+      await execFileAsync(
+        '/usr/bin/open',
+        ['-a', 'Terminal', '--', resolvedWorktree],
+        {
+          timeout: 10_000,
+          windowsHide: true,
+        },
+      );
+      return { kind: 'performed' };
+    } catch {
+      return {
+        kind: 'unavailable',
+        message: 'The Worktree is no longer available. Refresh and try again.',
+      };
+    }
+  }
   try {
     const target = await session.resolveFileNativeTarget(request.targetId);
     if (request.kind === 'copy_relative_path') {

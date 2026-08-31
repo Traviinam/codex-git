@@ -33,5 +33,6 @@ export {
   type RemoteFetchResult,
   type RepositoryFetchRequest,
   type RepositorySession,
+  type WorktreeNativeTarget,
   RepositoryTargetFailure,
 } from './repository-session.js';
