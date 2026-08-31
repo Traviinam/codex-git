@@ -9,7 +9,10 @@ import type {
   RepositoryOverviewSnapshot,
   WorktreeOverviewSnapshot,
 } from './repository-overview-model.js';
-import type { RepositoryStore } from './repository-store.js';
+import type {
+  RemoteOperationState,
+  RepositoryStore,
+} from './repository-store.js';
 import { ChangeGroups } from './ChangeGroups.js';
 import { DiffReview } from './DiffReview.js';
 import {
@@ -119,6 +122,11 @@ export function RepositoryOverview({
   const { snapshot } = state.source;
   const selected = snapshot.worktrees.find(
     (worktree) => worktree.worktreeId === state.selectedWorktreeId,
+  );
+  const selectedBranchName =
+    selected?.head.kind === 'local_branch' ? selected.head.displayName : null;
+  const selectedTerminalTarget = selected?.nativeTargets.find(({ actions }) =>
+    actions.includes('open_terminal'),
   );
   const unavailableCount = snapshot.worktrees.filter(
     (worktree) =>
@@ -405,17 +413,103 @@ export function RepositoryOverview({
               >
                 Switch Branch
               </button>
-              <button
-                aria-label={`Upstream actions for ${selected.displayName}`}
-                type="button"
-                disabled
-              >
-                Upstream actions
-              </button>
+              {selected.upstream.kind === 'tracking' ? (
+                <>
+                  <button
+                    aria-label={`Pull ${selected.upstream.displayName} into ${selected.displayName}`}
+                    type="button"
+                    disabled={
+                      !pullAllowed(selected, snapshot.operations) ||
+                      state.remoteOperation.kind === 'running'
+                    }
+                    onClick={() => store.pull()}
+                  >
+                    Pull {selected.upstream.displayName}
+                  </button>
+                  <button
+                    aria-label={`Push ${selected.displayName} to ${selected.upstream.displayName}`}
+                    type="button"
+                    disabled={
+                      !pushAllowed(selected, snapshot.operations) ||
+                      state.remoteOperation.kind === 'running'
+                    }
+                    title={
+                      selected.status.kind === 'changed'
+                        ? 'Only committed history is pushed; uncommitted content stays local.'
+                        : undefined
+                    }
+                    onClick={() => store.push()}
+                  >
+                    Push {selected.upstream.displayName}
+                  </button>
+                  {selected.status.kind === 'changed' ? (
+                    <small>
+                      Uncommitted content stays local and is not included in
+                      Push.
+                    </small>
+                  ) : null}
+                </>
+              ) : selected.upstream.kind === 'unpublished' &&
+                selectedBranchName !== null ? (
+                snapshot.remotes.map((remote) => {
+                  const target = `${remote.displayName}/${selectedBranchName}`;
+                  return (
+                    <button
+                      aria-label={`Publish ${selectedBranchName} to ${target}`}
+                      type="button"
+                      key={remote.remoteId}
+                      disabled={
+                        !publishAllowed(selected, snapshot.operations) ||
+                        state.remoteOperation.kind === 'running'
+                      }
+                      onClick={() => {
+                        if (
+                          globalThis.confirm(
+                            `Publish Local Branch ${selectedBranchName} to exact target ${target}?`,
+                          )
+                        ) {
+                          store.publish(remote.remoteId);
+                        }
+                      }}
+                    >
+                      Publish to {target}
+                    </button>
+                  );
+                })
+              ) : null}
             </div>
             {nativeActionStatus?.worktreeId !== selected.worktreeId ? null : (
               <p aria-live="polite" role="status">
                 {nativeActionStatus.message}
+              </p>
+            )}
+            {selected.upstream.kind === 'tracking' &&
+            (selected.upstream.ahead ?? 0) > 0 &&
+            (selected.upstream.behind ?? 0) > 0 ? (
+              <section aria-label="Diverged Upstream guidance">
+                <p>
+                  This Local Branch and its Upstream diverged. Open the exact
+                  selected Worktree in Terminal to Merge or Rebase explicitly.
+                </p>
+                {selectedTerminalTarget === undefined ? null : (
+                  <button
+                    aria-label={`Open ${selected.displayName} in Terminal`}
+                    type="button"
+                    onClick={() => {
+                      void store.requestNativeAction({
+                        kind: 'open_terminal',
+                        targetId: selectedTerminalTarget.targetId,
+                      });
+                    }}
+                  >
+                    Open {selected.displayName} in Terminal
+                  </button>
+                )}
+              </section>
+            ) : null}
+            {state.remoteOperation.kind === 'idle' ? null : (
+              <p aria-live="polite" role="status">
+                {remoteOperationLabel(state.remoteOperation)}
               </p>
             )}
             {branchPicker.kind === 'closed' ? null : (
@@ -539,7 +633,31 @@ export function RepositoryOverview({
                 worktree={selected}
                 selectedFileId={state.selectedFileId}
                 onSelect={(fileId) => store.selectFile(fileId)}
+                onMutate={(kind, fileIds) => store.mutateFiles(kind, fileIds)}
               />
+              {state.fileMutationResult === null ? null : (
+                <section aria-live="polite" role="status">
+                  <h4>File operation result</h4>
+                  {'message' in state.fileMutationResult ? (
+                    <p>{state.fileMutationResult.message}</p>
+                  ) : (
+                    <p>Changed Files updated.</p>
+                  )}
+                  {'effects' in state.fileMutationResult &&
+                  state.fileMutationResult.effects !== undefined ? (
+                    <ul>
+                      {state.fileMutationResult.effects.map((effect) => (
+                        <li key={effect.label}>
+                          {effect.label} —{' '}
+                          {effect.kind === 'succeeded'
+                            ? 'Succeeded'
+                            : `Failed: ${effect.message}`}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </section>
+              )}
             </section>
             <section>
               <h3>Diff</h3>
@@ -572,6 +690,84 @@ function branchSwitchAllowed(
         category === 'branch_switch' && phase !== 'terminal',
     )
   );
+}
+
+function pullAllowed(
+  worktree: WorktreeOverviewSnapshot,
+  operations: RepositoryOverviewSnapshot['operations'],
+): boolean {
+  return (
+    worktree.head.kind === 'local_branch' &&
+    worktree.upstream.kind === 'tracking' &&
+    worktree.upstream.ahead === 0 &&
+    (worktree.upstream.behind ?? 0) > 0 &&
+    worktree.status.kind === 'clean' &&
+    worktree.freshness.kind === 'current' &&
+    !remoteOperationActive(operations)
+  );
+}
+
+function pushAllowed(
+  worktree: WorktreeOverviewSnapshot,
+  operations: RepositoryOverviewSnapshot['operations'],
+): boolean {
+  return (
+    worktree.head.kind === 'local_branch' &&
+    worktree.upstream.kind === 'tracking' &&
+    worktree.upstream.behind === 0 &&
+    worktree.upstream.ahead !== null &&
+    worktree.freshness.kind === 'current' &&
+    statusAllowsRemoteWrite(worktree.status) &&
+    !remoteOperationActive(operations)
+  );
+}
+
+function publishAllowed(
+  worktree: WorktreeOverviewSnapshot,
+  operations: RepositoryOverviewSnapshot['operations'],
+): boolean {
+  return (
+    worktree.head.kind === 'local_branch' &&
+    worktree.upstream.kind === 'unpublished' &&
+    worktree.freshness.kind === 'current' &&
+    statusAllowsRemoteWrite(worktree.status) &&
+    !remoteOperationActive(operations)
+  );
+}
+
+function statusAllowsRemoteWrite(status: WorktreeOverviewSnapshot['status']) {
+  return (
+    status.kind === 'clean' ||
+    (status.kind === 'changed' && status.conflictCount === 0)
+  );
+}
+
+function remoteOperationActive(
+  operations: RepositoryOverviewSnapshot['operations'],
+) {
+  return operations.some(
+    ({ category, phase }) =>
+      phase !== 'terminal' &&
+      (category === 'fetch' ||
+        category === 'pull' ||
+        category === 'push' ||
+        category === 'publish'),
+  );
+}
+
+function remoteOperationLabel(state: RemoteOperationState): string {
+  if (state.kind === 'idle') return '';
+  if (state.kind === 'running') {
+    return `${state.operation[0]!.toLocaleUpperCase()}${state.operation.slice(1)} in progress…`;
+  }
+  if (state.kind === 'failed') return state.message;
+  const result = state.result;
+  if (result.kind === 'succeeded') {
+    return result.result.kind === 'remote'
+      ? result.result.summary
+      : 'The Remote is already up to date.';
+  }
+  return result.message;
 }
 
 function compareWorktrees(

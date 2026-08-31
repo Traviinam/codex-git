@@ -168,7 +168,12 @@ async function dispatchRepositoryCommand(
   session: RepositorySession,
   request: CommandEnvelope,
 ): Promise<OperationReceipt> {
-  if (request.command.kind === 'switch_branch') {
+  if (
+    request.command.kind === 'switch_branch' ||
+    request.command.kind === 'pull' ||
+    request.command.kind === 'push' ||
+    request.command.kind === 'publish'
+  ) {
     return session.dispatch(request);
   }
   if (
@@ -201,6 +206,28 @@ async function performNativeAction(
   request: NativeActionRequest,
   nativeHostConnection?: () => HostConnection | null,
 ): Promise<NativeActionResult> {
+  if (request.kind === 'open_terminal') {
+    try {
+      const target = await session.resolveWorktreeNativeTarget(
+        request.targetId,
+      );
+      const resolvedWorktree = await revalidateWorktreePath(target);
+      await execFileAsync(
+        '/usr/bin/open',
+        ['-a', 'Terminal', '--', resolvedWorktree],
+        {
+          timeout: 10_000,
+          windowsHide: true,
+        },
+      );
+      return { kind: 'performed' };
+    } catch {
+      return {
+        kind: 'unavailable',
+        message: 'The Worktree is no longer available. Refresh and try again.',
+      };
+    }
+  }
   try {
     if (request.kind === 'copy_relative_path') {
       const target = await session.resolveFileNativeTarget(request.targetId);
@@ -214,6 +241,9 @@ async function performNativeAction(
     }
     if (request.kind === 'copy_absolute_path') {
       const target = await resolvePathTarget(session, request.targetId);
+      if (target.kind === 'worktree') {
+        await revalidateWorktreePath(target);
+      }
       return { kind: 'copy_text', text: target.absolutePath };
     }
     if (
@@ -249,17 +279,6 @@ async function performNativeAction(
       if (hostResult.status !== 'succeeded') {
         throw new Error('The Codex host rejected the exact target.');
       }
-      return { kind: 'performed' };
-    }
-    if (request.kind === 'open_terminal') {
-      const target = await session.resolveWorktreeNativeTarget(
-        request.targetId,
-      );
-      const path = await revalidateWorktreePath(target);
-      await execFileAsync('/usr/bin/open', ['-a', 'Terminal', '--', path], {
-        timeout: 10_000,
-        windowsHide: true,
-      });
       return { kind: 'performed' };
     }
     const target = await resolvePathTarget(session, request.targetId);

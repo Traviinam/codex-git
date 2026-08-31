@@ -103,11 +103,19 @@ function createMutableFixture(
           message: 'Native actions are not installed in this fixture.',
         };
       },
+      async mutateFiles() {
+        throw new Error('File mutations are not configured for this fixture.');
+      },
       async searchBranches() {
         return { refsRevision: 0, candidates: [] };
       },
       async switchBranch() {
         throw new Error('Branch switching is not configured for this fixture.');
+      },
+      async requestRemoteOperation() {
+        throw new Error(
+          'Remote operations are not configured for this fixture.',
+        );
       },
     },
     publish(nextState) {
@@ -305,7 +313,14 @@ const linkedWorktrees: RepositoryOverviewSnapshot['worktrees'] = Array.from(
             }
           : { kind: 'clean' as const },
       changes: [],
-      nativeTargets: [],
+      nativeTargets: [
+        {
+          targetId: nativeTargetIdSchema.parse(
+            `native_${(index + 16).toString(16).padStart(32, '0')}`,
+          ),
+          actions: ['open_terminal'] as const,
+        },
+      ],
       upstream: {
         kind: 'tracking' as const,
         displayName: `origin/feat/${displayName}`,

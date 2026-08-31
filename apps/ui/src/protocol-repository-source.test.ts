@@ -393,6 +393,66 @@ describe('ProtocolRepositorySource', () => {
       'snapshot',
     ]);
   });
+
+  it('submits typed Push intent and recovers the sanitized outcome', async () => {
+    let commandBody: unknown;
+    const remoteResult = {
+      kind: 'succeeded',
+      operationId: operationReceipt.operationId,
+      result: { kind: 'remote', summary: 'Pushed dev.' },
+    };
+    const source = createProtocolRepositorySource({
+      projectPath: '/projects/codex-git',
+      sessionUrl: 'http://127.0.0.1:4173/instance/fixture-token/v1/session',
+      createEventSource: () => new FakeEventSource(),
+      fetch: async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/session')) {
+          return jsonResponse({
+            ...sessionMetadata,
+            capabilities: {
+              ...sessionMetadata.capabilities,
+              commands: true,
+              operationRecovery: true,
+            },
+          });
+        }
+        if (url.endsWith('/commands')) {
+          commandBody = JSON.parse(String(init?.body));
+          return jsonResponse({
+            ...operationReceipt,
+            clientCommandId: (commandBody as { clientCommandId: string })
+              .clientCommandId,
+          });
+        }
+        if (url.endsWith('/operations')) return jsonResponse(remoteResult);
+        return jsonResponse(repositorySnapshot);
+      },
+    });
+    await until(() => source.getSnapshot().kind === 'repository');
+
+    const result = await source.requestRemoteOperation({
+      kind: 'push',
+      worktreeId: worktreeIdSchema.parse(
+        repositorySnapshot.worktrees[0]!.worktreeId,
+      ),
+      expectedWorktreeRevision:
+        repositorySnapshot.worktrees[0]!.worktreeRevision,
+      expectedRefsRevision: repositorySnapshot.refsRevision,
+    });
+
+    expect(commandBody).toEqual({
+      clientCommandId: expect.stringMatching(/^command_[0-9a-f]{32}$/u),
+      command: {
+        kind: 'push',
+        worktreeId: repositorySnapshot.worktrees[0]!.worktreeId,
+        expectedWorktreeRevision:
+          repositorySnapshot.worktrees[0]!.worktreeRevision,
+        expectedRefsRevision: repositorySnapshot.refsRevision,
+      },
+    });
+    expect(result).toEqual(remoteResult);
+  });
 });
 
 class FakeEventSource {

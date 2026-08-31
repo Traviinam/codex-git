@@ -22,10 +22,15 @@ export interface PublishedRepositoryObservation {
   readonly worktrees: readonly PublishedObservationWorktree[];
 }
 
+export const privateWorktreeIdentityEvidence = Symbol(
+  'privateWorktreeIdentityEvidence',
+);
+
 export interface PublishedObservationWorktree extends Omit<
   DiscoveredWorktree,
-  'canonicalPathBytes' | 'provenance'
+  'canonicalPathBytes' | 'privateIdentityEvidence' | 'provenance'
 > {
+  readonly [privateWorktreeIdentityEvidence]?: string;
   readonly worktreeRevision: number;
   readonly nativeTargetId: NativeTargetId | null;
   readonly freshness: WorktreeFreshness;
@@ -117,6 +122,7 @@ export function publishObservedFacts(
           ? prior.nativeTargetId
           : (issueNativeTargetId?.() ?? null),
       generation: worktree.generation,
+      [privateWorktreeIdentityEvidence]: worktree.privateIdentityEvidence,
       displayPath: worktree.displayPath,
       canonicalPath: worktree.canonicalPath,
       role: worktree.role,
@@ -141,13 +147,19 @@ export function publishObservedFacts(
     const changes =
       !gitFactsChanged && prior !== undefined
         ? prior.changes
-        : observedFacts.changes.map((change) => ({
-            ...change,
-            fileId: requireFileIdIssuer(issueFileId)(),
-            nativeTargetId: requireNativeTargetIdIssuer(issueNativeTargetId)(),
-          }));
+        : observedFacts.changes.map((change) =>
+            publishedChangedFile(
+              change,
+              requireFileIdIssuer(issueFileId)(),
+              requireNativeTargetIdIssuer(issueNativeTargetId)(),
+            ),
+          );
     return {
       ...candidate,
+      nativeTargetId:
+        prior?.generation === worktree.generation
+          ? prior.nativeTargetId
+          : requireNativeTargetIdIssuer(issueNativeTargetId)(),
       changes,
       worktreeRevision:
         prior === undefined ? 1 : prior.worktreeRevision + (changed ? 1 : 0),
@@ -289,10 +301,17 @@ function worktreeEvidence(
     index: worktree.index,
     status: worktree.status,
     changes: worktree.changes.map((change) => {
-      if ('fileId' in change) {
-        return toObservedChange(change);
-      }
-      return change;
+      const observed = 'fileId' in change ? toObservedChange(change) : change;
+      return {
+        kind: observed.kind,
+        baseline: observed.baseline,
+        displayPath: observed.displayPath,
+        pathBytes: observed.pathBytes,
+        previousDisplayPath: observed.previousDisplayPath,
+        previousPathBytes: observed.previousPathBytes,
+        workingFilePresent: observed.workingFilePresent,
+        baselineFingerprint: observed.baselineFingerprint,
+      };
     }),
   });
 }
@@ -300,7 +319,7 @@ function worktreeEvidence(
 function toObservedChange(
   change: PublishedChangedFile,
 ): ChangedFileObservation {
-  return {
+  const observed = {
     kind: change.kind,
     baseline: change.baseline,
     displayPath: change.displayPath,
@@ -308,7 +327,28 @@ function toObservedChange(
     previousDisplayPath: change.previousDisplayPath,
     previousPathBytes: change.previousPathBytes,
     workingFilePresent: change.workingFilePresent,
-  } as ChangedFileObservation;
+  } as Omit<ChangedFileObservation, 'baselineFingerprint'>;
+  Object.defineProperty(observed, 'baselineFingerprint', {
+    enumerable: false,
+    value: change.baselineFingerprint,
+  });
+  return observed as ChangedFileObservation;
+}
+
+function publishedChangedFile(
+  change: ChangedFileObservation,
+  fileId: FileId,
+  nativeTargetId: NativeTargetId,
+): PublishedChangedFile {
+  const published = { ...change, fileId, nativeTargetId } as Omit<
+    PublishedChangedFile,
+    'baselineFingerprint'
+  >;
+  Object.defineProperty(published, 'baselineFingerprint', {
+    enumerable: false,
+    value: change.baselineFingerprint,
+  });
+  return published as PublishedChangedFile;
 }
 
 function requireFileIdIssuer(

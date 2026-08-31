@@ -4,7 +4,9 @@ import type {
   FileId,
   NativeActionRequest,
   NativeActionResult,
+  OperationResult,
   RefId,
+  RemoteId,
   WorktreeId,
 } from '@codex-git/protocol';
 
@@ -35,6 +37,18 @@ export type BranchPickerState =
       readonly message: string;
     };
 
+export type RemoteOperationState =
+  | { readonly kind: 'idle' }
+  | {
+      readonly kind: 'running';
+      readonly operation: 'pull' | 'push' | 'publish';
+    }
+  | {
+      readonly kind: 'result';
+      readonly result: import('@codex-git/protocol').OperationResult;
+    }
+  | { readonly kind: 'failed'; readonly message: string };
+
 import type {
   RepositoryOverviewSnapshot,
   RepositoryOverviewSource,
@@ -52,6 +66,8 @@ export interface RepositoryStoreSnapshot {
   readonly selectionNotice: string | null;
   readonly focusRecoveryRevision: number;
   readonly branchPicker: BranchPickerState;
+  readonly remoteOperation: RemoteOperationState;
+  readonly fileMutationResult: OperationResult | null;
 }
 
 export interface RepositoryStore {
@@ -70,10 +86,14 @@ export interface RepositoryStore {
   requestNativeAction(
     request: NativeActionRequest,
   ): Promise<NativeActionResult>;
+  mutateFiles(kind: 'stage' | 'unstage', fileIds: readonly FileId[]): void;
   openBranchPicker(): void;
   closeBranchPicker(): void;
   setBranchQuery(query: string): void;
   switchBranch(refId: RefId): void;
+  pull(): void;
+  push(): void;
+  publish(remoteId: RemoteId): void;
 }
 
 export function createRepositoryStore(
@@ -94,6 +114,11 @@ export function createRepositoryStore(
   let focusRecoveryRevision = 0;
   let branchPicker: BranchPickerState = { kind: 'closed' };
   let branchRequestGeneration = 0;
+  let remoteOperation: RemoteOperationState = { kind: 'idle' };
+  let fileMutationResult: OperationResult | null = null;
+  let fileFollow:
+    | { readonly displayPath: string; readonly kind: 'stage' | 'unstage' }
+    | undefined;
   let storeSnapshot = buildSnapshot();
   let disposed = false;
 
@@ -134,10 +159,22 @@ export function createRepositoryStore(
       selectedFileId !== null &&
       !selected.changes.some(({ fileId }) => fileId === selectedFileId)
     ) {
-      selectedFileId = null;
+      const followed =
+        fileFollow === undefined
+          ? undefined
+          : selected.changes.find(
+              ({ displayPath, kind }) =>
+                displayPath === fileFollow?.displayPath &&
+                (fileFollow.kind === 'stage'
+                  ? kind === 'staged_change'
+                  : kind === 'change' || kind === 'untracked'),
+            );
+      selectedFileId = followed?.fileId ?? null;
       clearDiff();
-      selectionNotice =
-        'Changed Files were refreshed; the previous file selection was cleared.';
+      selectionNotice = followed
+        ? `${followed.displayPath} moved to its new Change Group.`
+        : 'Changed Files were refreshed; the previous file selection was cleared.';
+      fileFollow = undefined;
     } else {
       selectionNotice = null;
     }
@@ -239,6 +276,40 @@ export function createRepositoryStore(
             message: 'The Repository view is no longer active.',
           })
         : source.requestNativeAction(request),
+    mutateFiles(kind, fileIds) {
+      if (disposed || fileIds.length === 0 || selectedWorktreeId === null) {
+        return;
+      }
+      const worktree = findWorktree(sourceState, selectedWorktreeId);
+      if (worktree === null) return;
+      const selectedChange = worktree.changes.find(
+        ({ fileId }) => fileId === selectedFileId && fileIds.includes(fileId),
+      );
+      fileFollow =
+        selectedChange === undefined
+          ? undefined
+          : { displayPath: selectedChange.displayPath, kind };
+      void source
+        .mutateFiles({
+          kind,
+          worktreeId: worktree.worktreeId,
+          expectedWorktreeRevision: worktree.worktreeRevision,
+          fileIds,
+        })
+        .then((result) => {
+          if (disposed) return;
+          fileMutationResult = result;
+          emit();
+        })
+        .catch(() => {
+          if (disposed) return;
+          selectionNotice = 'The file mutation could not be submitted.';
+          emit();
+        })
+        .finally(() => {
+          fileFollow = undefined;
+        });
+    },
     openBranchPicker() {
       if (disposed || selectedWorktreeId === null) return;
       void loadBranches('');
@@ -312,7 +383,60 @@ export function createRepositoryStore(
           emit();
         });
     },
+    pull() {
+      void runRemoteOperation('pull');
+    },
+    push() {
+      void runRemoteOperation('push');
+    },
+    publish(remoteId) {
+      void runRemoteOperation('publish', remoteId);
+    },
   };
+
+  async function runRemoteOperation(
+    kind: 'pull' | 'push' | 'publish',
+    remoteId?: RemoteId,
+  ) {
+    if (
+      disposed ||
+      remoteOperation.kind === 'running' ||
+      sourceState.kind !== 'repository' ||
+      selectedWorktreeId === null
+    ) {
+      return;
+    }
+    const worktree = sourceState.snapshot.worktrees.find(
+      (candidate) => candidate.worktreeId === selectedWorktreeId,
+    );
+    if (
+      worktree === undefined ||
+      (kind === 'publish' && remoteId === undefined)
+    ) {
+      return;
+    }
+    remoteOperation = { kind: 'running', operation: kind };
+    emit();
+    try {
+      const result = await source.requestRemoteOperation({
+        kind,
+        worktreeId: worktree.worktreeId,
+        expectedWorktreeRevision: worktree.worktreeRevision,
+        expectedRefsRevision: sourceState.snapshot.refsRevision,
+        remoteId,
+      });
+      if (disposed) return;
+      remoteOperation = { kind: 'result', result };
+      emit();
+    } catch {
+      if (disposed) return;
+      remoteOperation = {
+        kind: 'failed',
+        message: 'The Remote operation could not be submitted.',
+      };
+      emit();
+    }
+  }
 
   async function loadBranches(query: string) {
     const worktreeId = selectedWorktreeId;
@@ -365,6 +489,8 @@ export function createRepositoryStore(
       selectionNotice,
       focusRecoveryRevision,
       branchPicker,
+      remoteOperation,
+      fileMutationResult,
     };
   }
 

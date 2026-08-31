@@ -2,6 +2,7 @@ import { resolve, sep } from 'node:path';
 
 import {
   createOpaqueIdAuthority,
+  type AbsolutePath,
   type BranchSearchRequest,
   type BranchSearchResult,
   type CommandEnvelope,
@@ -23,6 +24,8 @@ import {
   type OperationSessionAdmission,
   type OperationSessionSummary,
 } from './operation-session.js';
+import type { RemoteOperationResult } from './remote-operation.js';
+import type { FileMutationInspector } from './file-mutation-inspection.js';
 import type {
   RepositoryInvalidation,
   RepositoryOpenResult,
@@ -32,6 +35,7 @@ import type {
   ScopedRepositoryPublicationSession,
 } from './repository-publication.js';
 import type { WorktreeProvenance } from './worktree-provenance.js';
+import { privateWorktreeIdentityEvidence } from './observation-publication.js';
 
 const OPERATION_TIMEOUT_MILLISECONDS = 30_000;
 
@@ -69,6 +73,11 @@ export interface RepositorySessionOptions {
   ) => Promise<RemoteFetchResult>;
   readonly now?: () => Date;
   readonly runGit?: GitProcessRunner;
+  readonly executeRemoteOperation?: (
+    request: import('./remote-operation.js').RemoteOperationRequest,
+    signal: AbortSignal,
+  ) => Promise<import('./remote-operation.js').RemoteOperationResult>;
+  readonly inspectFileMutationTargets?: FileMutationInspector;
   readonly diff?: (
     worktree: RepositorySnapshot['worktrees'][number],
     fileId: FileId,
@@ -115,6 +124,10 @@ export interface WorktreeNativeTarget {
   readonly worktreePath: string;
 }
 
+export interface WorktreeNativeTarget {
+  readonly worktreePath: string;
+}
+
 export interface InternalRepositorySession
   extends RepositorySession, ScopedRepositoryPublicationSession {}
 
@@ -132,6 +145,8 @@ type GitProcessRunner = (
   allowLargeOutput: boolean,
   acceptedEmptyExitCode?: 1,
   signal?: AbortSignal,
+  maximumOutputBytes?: number,
+  input?: Uint8Array,
 ) => Promise<Uint8Array>;
 
 interface BranchBinding {
@@ -152,6 +167,45 @@ type BranchSwitchEvidence =
       >;
     }
   | { readonly kind: 'attempted'; readonly displayName: string };
+
+type RemoteCommand = Extract<
+  CommandEnvelope['command'],
+  { readonly kind: 'pull' | 'push' | 'publish' }
+>;
+
+type RemoteOperationEvidence =
+  | {
+      readonly kind: 'rejected';
+      readonly result: Omit<
+        Extract<OperationResult, { readonly kind: 'rejected' }>,
+        'operationId'
+      >;
+    }
+  | { readonly kind: 'no_change' }
+  | {
+      readonly kind: 'completed';
+      readonly branchName: string;
+      readonly localObjectId: string;
+      readonly upstreamDisplayName: string;
+    }
+  | {
+      readonly kind: 'failed_known';
+      readonly code: OperationFailureCode;
+      readonly message: string;
+    }
+  | {
+      readonly kind: 'unknown';
+      readonly branchName: string;
+      readonly localObjectId: string;
+      readonly upstreamDisplayName: string;
+    }
+  | {
+      readonly kind: 'publish_unconfigured';
+      readonly branchName: string;
+      readonly localObjectId: string;
+      readonly remoteName: string;
+      readonly trackingRef: string;
+    };
 
 export function createRepositorySession(
   delegate: ScopedRepositoryPublicationSession,
@@ -229,6 +283,678 @@ export function createRepositorySession(
       if (summary.phase === 'terminal') schedulePostOperationRefresh();
     },
   });
+
+  const reconcileRemoteTracking = async (request: {
+    readonly worktreePath: AbsolutePath;
+    readonly remoteName: string;
+    readonly remoteBranchRef: string;
+    readonly trackingRef: string;
+  }): Promise<RemoteOperationResult> => {
+    if (options.executeRemoteOperation === undefined) {
+      return unknownRemoteReconciliation();
+    }
+    try {
+      return await options.executeRemoteOperation(
+        { kind: 'refresh_tracking', ...request },
+        AbortSignal.timeout(10_000),
+      );
+    } catch {
+      return unknownRemoteReconciliation();
+    }
+  };
+
+  const dispatchRemoteCommand = async (
+    command: RemoteCommand,
+  ): Promise<OperationSessionAdmission> => {
+    const initial = latestBase?.worktrees.find(
+      ({ worktreeId }) => worktreeId === command.worktreeId,
+    );
+    if (initial === undefined) {
+      throw new Error('Remote operations require a current Worktree snapshot.');
+    }
+    if (command.kind === 'publish') {
+      if (
+        initial.head.kind !== 'local_branch' ||
+        initial.head.objectId === null ||
+        initial.upstream.kind !== 'unpublished'
+      ) {
+        throw new Error('Publish requires an Unpublished Local Branch.');
+      }
+      const initialHead = initial.head;
+      const initialObjectId = initialHead.objectId;
+      if (initialObjectId === null) {
+        throw new Error('Publish requires a committed Local Branch.');
+      }
+      const initialRemote = latestBase?.remotes.find(
+        ({ remoteId }) => remoteId === command.remoteId,
+      );
+      if (initialRemote === undefined) {
+        throw new Error('Publish requires an exact configured Remote.');
+      }
+      const destinationRef = initialHead.fullName;
+      const trackingRef = `refs/remotes/${initialRemote.displayName}/${initialHead.displayName}`;
+      return operations.dispatch({
+        kind: 'publish',
+        worktreeGeneration: initial.generation,
+        localBranchRef: initialHead.fullName,
+        destinationRef,
+        remoteId: initialRemote.remoteId,
+        async reconcileBusy() {
+          await observe(() => delegate.requestRefresh()).catch(() => undefined);
+        },
+        async execute({ signal }): Promise<RemoteOperationEvidence> {
+          const current = await observe(() => delegate.requestRefresh()).catch(
+            () => undefined,
+          );
+          if (current?.kind !== 'repository') {
+            return reject('stale', 'The Repository is no longer available.');
+          }
+          const repository = current.repository;
+          const worktree = repository.worktrees.find(
+            ({ worktreeId }) => worktreeId === command.worktreeId,
+          );
+          const remote = repository.remotes.find(
+            ({ remoteId }) => remoteId === command.remoteId,
+          );
+          if (
+            repository.refsRevision !== command.expectedRefsRevision ||
+            worktree === undefined ||
+            worktree.worktreeRevision !== command.expectedWorktreeRevision ||
+            worktree.head.kind !== 'local_branch' ||
+            worktree.head.fullName !== initialHead.fullName ||
+            worktree.head.objectId !== initialHead.objectId ||
+            worktree.upstream.kind !== 'unpublished' ||
+            remote?.displayName !== initialRemote.displayName
+          ) {
+            return reject(
+              'stale',
+              'Worktree, Branch, Remote, or publication state changed; refresh and confirm again.',
+            );
+          }
+          if (
+            worktree.availability.kind !== 'available' ||
+            worktree.canonicalPath === null ||
+            worktree.freshness.kind !== 'fresh' ||
+            worktree.status === null ||
+            worktree.status.conflicted !== 0 ||
+            worktree.status.inProgressOperation !== undefined ||
+            worktree.gitLock.kind !== 'unlocked'
+          ) {
+            return reject(
+              'precondition_failed',
+              'Publish requires an available Local Branch with no Conflict or Git operation.',
+            );
+          }
+          if (options.executeRemoteOperation === undefined) {
+            return reject(
+              'unsupported_state',
+              'Publish is unavailable in this Repository Session.',
+            );
+          }
+          const pushed = await options.executeRemoteOperation(
+            {
+              kind: 'push',
+              worktreePath: worktree.canonicalPath,
+              remoteName: remote.displayName,
+              localBranchRef: initialHead.fullName,
+              destinationRef,
+            },
+            signal,
+          );
+          if (pushed.kind === 'failed_known') return pushed;
+          const unknownEvidence: Extract<
+            RemoteOperationEvidence,
+            { readonly kind: 'unknown' }
+          > = {
+            kind: 'unknown',
+            branchName: initialHead.displayName,
+            localObjectId: initialObjectId,
+            upstreamDisplayName: `${remote.displayName}/${initialHead.displayName}`,
+          };
+          const publicationEvidence: Extract<
+            RemoteOperationEvidence,
+            { readonly kind: 'publish_unconfigured' }
+          > = {
+            kind: 'publish_unconfigured',
+            branchName: initialHead.displayName,
+            localObjectId: initialObjectId,
+            remoteName: remote.displayName,
+            trackingRef,
+          };
+          const trackingReconciliation = await reconcileRemoteTracking({
+            worktreePath: worktree.canonicalPath,
+            remoteName: remote.displayName,
+            remoteBranchRef: destinationRef,
+            trackingRef,
+          });
+          if (trackingReconciliation.kind !== 'completed') {
+            return unknownEvidence;
+          }
+          const pushedState = await observe(() =>
+            delegate.requestRefresh(),
+          ).catch(() => undefined);
+          if (
+            pushedState?.kind !== 'repository' ||
+            pushedState.repository.refs.find(
+              ({ fullName }) => fullName === trackingRef,
+            )?.objectId !== initialHead.objectId
+          ) {
+            return publicationEvidence;
+          }
+          if (options.runGit === undefined) return publicationEvidence;
+          try {
+            await options.runGit(
+              [
+                '-C',
+                worktree.canonicalPath,
+                'branch',
+                `--set-upstream-to=${trackingRef}`,
+                '--',
+                initialHead.displayName,
+              ],
+              false,
+              undefined,
+              signal,
+            );
+          } catch {
+            return publicationEvidence;
+          }
+          return {
+            kind: 'completed',
+            branchName: initialHead.displayName,
+            localObjectId: initialObjectId,
+            upstreamDisplayName: `${remote.displayName}/${initialHead.displayName}`,
+          };
+        },
+        async reconcile(context) {
+          const evidence =
+            context.execution.kind === 'returned'
+              ? (context.execution.evidence as RemoteOperationEvidence)
+              : undefined;
+          if (evidence?.kind === 'rejected') return evidence.result;
+          const trackingReconciliation =
+            evidence?.kind === 'no_change'
+              ? null
+              : await reconcileRemoteTracking({
+                  worktreePath: initial.canonicalPath!,
+                  remoteName: initialRemote.displayName,
+                  remoteBranchRef: destinationRef,
+                  trackingRef,
+                });
+          if (
+            trackingReconciliation !== null &&
+            trackingReconciliation.kind !== 'completed'
+          ) {
+            return unknownRemoteOutcome();
+          }
+          const reconciled = await observe(() =>
+            delegate.requestRefresh(),
+          ).catch(() => undefined);
+          if (
+            reconciled?.kind !== 'repository' ||
+            reconciled.repository.refresh.kind !== 'fresh'
+          ) {
+            return unknownRemoteOutcome();
+          }
+          if (evidence?.kind === 'no_change') {
+            return { kind: 'succeeded', result: { kind: 'no_change' } };
+          }
+          const worktree = reconciled.repository.worktrees.find(
+            ({ worktreeId }) => worktreeId === command.worktreeId,
+          );
+          const branchName = initialHead.displayName;
+          const localObjectId = initialObjectId;
+          const remoteName =
+            evidence?.kind === 'publish_unconfigured'
+              ? evidence.remoteName
+              : initialRemote.displayName;
+          const observedTrackingRef =
+            evidence?.kind === 'publish_unconfigured'
+              ? evidence.trackingRef
+              : trackingRef;
+          const remotePublished =
+            reconciled.repository.refs.find(
+              ({ fullName }) => fullName === observedTrackingRef,
+            )?.objectId === localObjectId;
+          if (
+            remotePublished &&
+            worktree?.head.kind === 'local_branch' &&
+            worktree.head.fullName === initialHead.fullName &&
+            worktree.head.objectId === localObjectId &&
+            worktree.upstream.kind === 'tracking' &&
+            worktree.upstream.remoteId === initialRemote.remoteId &&
+            worktree.upstream.ref.fullName === observedTrackingRef &&
+            worktree.upstream.ref.objectId === localObjectId
+          ) {
+            return {
+              kind: 'succeeded',
+              result: {
+                kind: 'remote',
+                summary: `Published ${branchName} to ${remoteName}.`,
+              },
+            };
+          }
+          if (remotePublished) {
+            return {
+              kind: 'partial_success',
+              message:
+                'The Branch was published, but its Upstream was not configured.',
+              effects: [
+                { kind: 'succeeded', label: `Published ${branchName}` },
+                {
+                  kind: 'failed_known',
+                  label: 'Configure Upstream',
+                  code: 'process_failed',
+                  message: 'Git could not configure the Local Branch Upstream.',
+                },
+              ],
+            };
+          }
+          if (evidence?.kind === 'failed_known') return evidence;
+          if (context.execution.kind !== 'returned' || evidence === undefined) {
+            return unknownRemoteOutcome();
+          }
+          return unknownRemoteOutcome();
+        },
+      });
+    }
+    if (command.kind === 'push') {
+      if (
+        initial.head.kind !== 'local_branch' ||
+        initial.upstream.kind !== 'tracking'
+      ) {
+        throw new Error('Push requires a Local Branch with an exact Upstream.');
+      }
+      const initialHead = initial.head;
+      const expectedUpstream = initial.upstream;
+      const configuredUpstream = await readConfiguredUpstreamTarget(
+        initial,
+        options.runGit,
+      );
+      const initialRemote = latestBase?.remotes.find(
+        ({ remoteId, displayName }) =>
+          remoteId === expectedUpstream.remoteId &&
+          displayName === configuredUpstream?.remoteName,
+      );
+      const destinationRef = configuredUpstream?.mergeRef ?? null;
+      if (initialRemote === undefined || destinationRef === null) {
+        throw new Error(
+          'Push requires an exact configured Remote destination.',
+        );
+      }
+      return operations.dispatch({
+        kind: 'push',
+        worktreeGeneration: initial.generation,
+        localBranchRef: initialHead.fullName,
+        destinationRef,
+        remoteId: expectedUpstream.remoteId,
+        async reconcileBusy() {
+          await observe(() => delegate.requestRefresh()).catch(() => undefined);
+        },
+        async execute({ signal }): Promise<RemoteOperationEvidence> {
+          const current = await observe(() => delegate.requestRefresh()).catch(
+            () => undefined,
+          );
+          if (current?.kind !== 'repository') {
+            return reject('stale', 'The Repository is no longer available.');
+          }
+          const repository = current.repository;
+          const worktree = repository.worktrees.find(
+            ({ worktreeId }) => worktreeId === command.worktreeId,
+          );
+          const remote = repository.remotes.find(
+            ({ remoteId }) => remoteId === expectedUpstream.remoteId,
+          );
+          if (
+            repository.refsRevision !== command.expectedRefsRevision ||
+            worktree === undefined ||
+            worktree.worktreeRevision !== command.expectedWorktreeRevision ||
+            worktree.head.kind !== 'local_branch' ||
+            worktree.head.fullName !== initialHead.fullName ||
+            worktree.head.objectId !== initialHead.objectId ||
+            worktree.upstream.kind !== 'tracking' ||
+            worktree.upstream.remoteId !== expectedUpstream.remoteId ||
+            worktree.upstream.ref.fullName !== expectedUpstream.ref.fullName ||
+            worktree.upstream.ref.objectId !== expectedUpstream.ref.objectId ||
+            remote?.displayName !== initialRemote.displayName
+          ) {
+            return reject(
+              'stale',
+              'Worktree, Branch, or Upstream state changed; refresh and try again.',
+            );
+          }
+          const currentConfiguredUpstream = await readConfiguredUpstreamTarget(
+            worktree,
+            options.runGit,
+          ).catch(() => null);
+          if (
+            currentConfiguredUpstream?.remoteName !==
+              configuredUpstream?.remoteName ||
+            currentConfiguredUpstream?.mergeRef !== configuredUpstream?.mergeRef
+          ) {
+            return reject(
+              'stale',
+              'The configured Upstream target changed; refresh and try again.',
+            );
+          }
+          if (
+            worktree.availability.kind !== 'available' ||
+            worktree.canonicalPath === null ||
+            worktree.freshness.kind !== 'fresh' ||
+            worktree.status === null ||
+            worktree.status.conflicted !== 0 ||
+            worktree.status.inProgressOperation !== undefined ||
+            worktree.gitLock.kind !== 'unlocked'
+          ) {
+            return reject(
+              'precondition_failed',
+              'Push requires an available Local Branch with no Conflict or Git operation.',
+            );
+          }
+          if (worktree.upstream.aheadBehind.kind !== 'cached') {
+            return reject(
+              'precondition_failed',
+              'Push requires current cached Upstream divergence.',
+            );
+          }
+          if (worktree.upstream.aheadBehind.behind > 0) {
+            return reject(
+              'precondition_failed',
+              'The Local Branch is behind or diverged from its Upstream. Pull or reconcile it first.',
+            );
+          }
+          if (worktree.upstream.aheadBehind.ahead === 0) {
+            return { kind: 'no_change' };
+          }
+          if (options.executeRemoteOperation === undefined) {
+            return reject(
+              'unsupported_state',
+              'Push is unavailable in this Repository Session.',
+            );
+          }
+          const result = await options.executeRemoteOperation(
+            {
+              kind: 'push',
+              worktreePath: worktree.canonicalPath,
+              remoteName: remote.displayName,
+              localBranchRef: initialHead.fullName,
+              destinationRef,
+            },
+            signal,
+          );
+          return result.kind === 'completed'
+            ? {
+                kind: 'completed',
+                branchName: initialHead.displayName,
+                localObjectId: initialHead.objectId!,
+                upstreamDisplayName: expectedUpstream.displayName,
+              }
+            : result.kind === 'failed_known'
+              ? result
+              : {
+                  kind: 'unknown',
+                  branchName: initialHead.displayName,
+                  localObjectId: initialHead.objectId!,
+                  upstreamDisplayName: expectedUpstream.displayName,
+                };
+        },
+        async reconcile(context) {
+          const evidence =
+            context.execution.kind === 'returned'
+              ? (context.execution.evidence as RemoteOperationEvidence)
+              : undefined;
+          if (evidence?.kind === 'rejected') return evidence.result;
+          const trackingReconciliation =
+            evidence?.kind === 'no_change'
+              ? null
+              : await reconcileRemoteTracking({
+                  worktreePath: initial.canonicalPath!,
+                  remoteName: initialRemote.displayName,
+                  remoteBranchRef: destinationRef,
+                  trackingRef: expectedUpstream.ref.fullName,
+                });
+          if (
+            trackingReconciliation !== null &&
+            trackingReconciliation.kind !== 'completed'
+          ) {
+            return unknownRemoteOutcome();
+          }
+          const reconciled = await observe(() =>
+            delegate.requestRefresh(),
+          ).catch(() => undefined);
+          if (
+            reconciled?.kind !== 'repository' ||
+            reconciled.repository.refresh.kind !== 'fresh'
+          ) {
+            return unknownRemoteOutcome();
+          }
+          if (evidence?.kind === 'no_change') {
+            return { kind: 'succeeded', result: { kind: 'no_change' } };
+          }
+          const worktree = reconciled.repository.worktrees.find(
+            ({ worktreeId }) => worktreeId === command.worktreeId,
+          );
+          if (
+            worktree?.head.kind === 'local_branch' &&
+            worktree.head.fullName === initialHead.fullName &&
+            worktree.head.objectId === initialHead.objectId &&
+            worktree.upstream.kind === 'tracking' &&
+            worktree.upstream.displayName === expectedUpstream.displayName &&
+            worktree.upstream.ref.objectId === initialHead.objectId &&
+            worktree.upstream.aheadBehind.kind === 'cached' &&
+            worktree.upstream.aheadBehind.ahead === 0 &&
+            worktree.upstream.aheadBehind.behind === 0
+          ) {
+            return {
+              kind: 'succeeded',
+              result: {
+                kind: 'remote',
+                summary: `Pushed ${initialHead.displayName}.`,
+              },
+            };
+          }
+          if (evidence?.kind === 'failed_known') return evidence;
+          return unknownRemoteOutcome();
+        },
+      });
+    }
+    if (command.kind !== 'pull') throw new Error('Unsupported Remote command.');
+    if (initial.head.kind !== 'local_branch') {
+      throw new Error('Pull requires a Local Branch.');
+    }
+    const initialHead = initial.head;
+    if (initial.upstream.kind !== 'tracking') {
+      throw new Error('Pull requires an exact configured Upstream.');
+    }
+    const expectedUpstream = initial.upstream;
+    const configuredUpstream = await readConfiguredUpstreamTarget(
+      initial,
+      options.runGit,
+    );
+    const initialRemote = latestBase?.remotes.find(
+      ({ remoteId, displayName }) =>
+        remoteId === expectedUpstream.remoteId &&
+        displayName === configuredUpstream?.remoteName,
+    );
+    if (configuredUpstream === null || initialRemote === undefined) {
+      throw new Error('Pull requires an exact configured Upstream target.');
+    }
+    return operations.dispatch({
+      kind: 'pull',
+      worktreeGeneration: initial.generation,
+      localBranchRef: initialHead.fullName,
+      upstreamRef: configuredUpstream.mergeRef,
+      remoteId: expectedUpstream.remoteId,
+      async reconcileBusy() {
+        await observe(() => delegate.requestRefresh()).catch(() => undefined);
+      },
+      async execute({ signal }): Promise<RemoteOperationEvidence> {
+        const current = await observe(() => delegate.requestRefresh()).catch(
+          () => undefined,
+        );
+        if (current?.kind !== 'repository') {
+          return reject('stale', 'The Repository is no longer available.');
+        }
+        const repository = current.repository;
+        const worktree = repository.worktrees.find(
+          ({ worktreeId }) => worktreeId === command.worktreeId,
+        );
+        if (
+          repository.refsRevision !== command.expectedRefsRevision ||
+          worktree === undefined ||
+          worktree.worktreeRevision !== command.expectedWorktreeRevision ||
+          worktree.head.kind !== 'local_branch' ||
+          worktree.head.fullName !== initialHead.fullName ||
+          worktree.head.objectId !== initialHead.objectId ||
+          worktree.upstream.kind !== 'tracking' ||
+          worktree.upstream.remoteId !== expectedUpstream.remoteId ||
+          worktree.upstream.ref.fullName !== expectedUpstream.ref.fullName ||
+          worktree.upstream.ref.objectId !== expectedUpstream.ref.objectId
+        ) {
+          return reject(
+            'stale',
+            'Worktree, Branch, or Upstream state changed; refresh and try again.',
+          );
+        }
+        const currentConfiguredUpstream = await readConfiguredUpstreamTarget(
+          worktree,
+          options.runGit,
+        ).catch(() => null);
+        if (
+          currentConfiguredUpstream?.remoteName !==
+            configuredUpstream.remoteName ||
+          currentConfiguredUpstream?.mergeRef !== configuredUpstream.mergeRef
+        ) {
+          return reject(
+            'stale',
+            'The configured Upstream target changed; refresh and try again.',
+          );
+        }
+        if (
+          worktree.availability.kind !== 'available' ||
+          worktree.canonicalPath === null ||
+          worktree.freshness.kind !== 'fresh' ||
+          worktree.status?.clean !== true ||
+          worktree.status.conflicted !== 0 ||
+          worktree.status.inProgressOperation !== undefined ||
+          worktree.index?.locked !== false ||
+          worktree.gitLock.kind !== 'unlocked'
+        ) {
+          return reject(
+            'precondition_failed',
+            'Pull requires a clean, available Worktree with no Git operation or lock.',
+          );
+        }
+        if (worktree.upstream.aheadBehind.kind !== 'cached') {
+          return reject(
+            'precondition_failed',
+            'Pull requires current cached Upstream divergence.',
+          );
+        }
+        const { ahead, behind } = worktree.upstream.aheadBehind;
+        if (ahead > 0 && behind > 0) {
+          return reject(
+            'precondition_failed',
+            'The Local Branch and Upstream diverged. Open Terminal to Merge or Rebase explicitly.',
+          );
+        }
+        if (behind === 0) return { kind: 'no_change' };
+        const currentUpstream = worktree.upstream;
+        const remote = repository.remotes.find(
+          ({ remoteId, displayName }) =>
+            remoteId === currentUpstream.remoteId &&
+            displayName === configuredUpstream.remoteName,
+        );
+        const remoteBranchRef = configuredUpstream.mergeRef;
+        if (
+          remote === undefined ||
+          remoteBranchRef === null ||
+          options.executeRemoteOperation === undefined
+        ) {
+          return reject(
+            'unsupported_state',
+            'The exact Pull target is unavailable in this Repository Session.',
+          );
+        }
+        const result = await options.executeRemoteOperation(
+          {
+            kind: 'pull',
+            worktreePath: worktree.canonicalPath,
+            remoteName: remote.displayName,
+            remoteBranchRef,
+          },
+          signal,
+        );
+        return result.kind === 'completed'
+          ? {
+              kind: 'completed',
+              branchName: worktree.head.displayName,
+              localObjectId: worktree.head.objectId!,
+              upstreamDisplayName: currentUpstream.displayName,
+            }
+          : result.kind === 'failed_known'
+            ? result
+            : {
+                kind: 'unknown',
+                branchName: worktree.head.displayName,
+                localObjectId: worktree.head.objectId!,
+                upstreamDisplayName: currentUpstream.displayName,
+              };
+      },
+      async reconcile(context) {
+        const evidence =
+          context.execution.kind === 'returned'
+            ? (context.execution.evidence as RemoteOperationEvidence)
+            : undefined;
+        if (evidence?.kind === 'rejected') return evidence.result;
+        if (evidence?.kind === 'no_change') {
+          await observe(() => delegate.requestRefresh()).catch(() => undefined);
+          return { kind: 'succeeded', result: { kind: 'no_change' } };
+        }
+        const trackingReconciliation = await reconcileRemoteTracking({
+          worktreePath: initial.canonicalPath!,
+          remoteName: initialRemote.displayName,
+          remoteBranchRef: configuredUpstream.mergeRef,
+          trackingRef: expectedUpstream.ref.fullName,
+        });
+        if (trackingReconciliation.kind !== 'completed') {
+          return unknownRemoteOutcome();
+        }
+        const reconciled = await observe(() => delegate.requestRefresh()).catch(
+          () => undefined,
+        );
+        if (
+          reconciled?.kind !== 'repository' ||
+          reconciled.repository.refresh.kind !== 'fresh'
+        ) {
+          return unknownRemoteOutcome();
+        }
+        const worktree = reconciled.repository.worktrees.find(
+          ({ worktreeId }) => worktreeId === command.worktreeId,
+        );
+        if (
+          worktree?.head.kind === 'local_branch' &&
+          worktree.head.fullName === initialHead.fullName &&
+          worktree.upstream.kind === 'tracking' &&
+          worktree.upstream.displayName === expectedUpstream.displayName &&
+          worktree.head.objectId === worktree.upstream.ref.objectId &&
+          worktree.upstream.aheadBehind.kind === 'cached' &&
+          worktree.upstream.aheadBehind.ahead === 0 &&
+          worktree.upstream.aheadBehind.behind === 0
+        ) {
+          return {
+            kind: 'succeeded',
+            result: {
+              kind: 'remote',
+              summary: `Pulled ${initialHead.displayName}.`,
+            },
+          };
+        }
+        if (evidence?.kind === 'failed_known') return evidence;
+        return unknownRemoteOutcome();
+      },
+    });
+  };
 
   return {
     snapshot: () => observe(() => delegate.snapshot()),
@@ -655,6 +1381,394 @@ export function createRepositorySession(
       };
     },
     async dispatch(request) {
+      if (
+        request.command.kind === 'pull' ||
+        request.command.kind === 'push' ||
+        request.command.kind === 'publish'
+      ) {
+        const admission = await dispatchRemoteCommand(request.command);
+        if (admission.kind === 'closed') {
+          throw new Error('The Repository Session is closed.');
+        }
+        return {
+          operationId:
+            admission.kind === 'accepted'
+              ? admission.operation.operationId
+              : admission.result.operationId,
+          clientCommandId: request.clientCommandId,
+          disposition: 'accepted',
+        };
+      }
+      if (
+        request.command.kind === 'stage' ||
+        request.command.kind === 'unstage'
+      ) {
+        const command = request.command;
+        const initial = latestBase?.worktrees.find(
+          ({ worktreeId }) => worktreeId === command.worktreeId,
+        );
+        if (initial === undefined) {
+          throw new Error(
+            'Stage and Unstage require a current Worktree snapshot.',
+          );
+        }
+        const initialRepositoryId = latestBase?.repositoryId;
+        const initialCommonGitDirectory = latestBase?.commonGitDirectory;
+        const initialGeneration = initial.generation;
+        const initialCanonicalPath = initial.canonicalPath;
+        const admission = await operations.dispatch({
+          kind: command.kind,
+          worktreeGeneration: initial.generation,
+          async reconcileBusy() {
+            await observe(() => delegate.requestRefresh()).catch(
+              () => undefined,
+            );
+          },
+          async execute({ signal }) {
+            const current = await observe(() =>
+              delegate.requestRefresh(),
+            ).catch(() => undefined);
+            const worktree =
+              current?.kind === 'repository'
+                ? current.repository.worktrees.find(
+                    ({ worktreeId }) => worktreeId === command.worktreeId,
+                  )
+                : undefined;
+            if (
+              current?.kind !== 'repository' ||
+              current.repository.repositoryId !== initialRepositoryId ||
+              current.repository.commonGitDirectory !==
+                initialCommonGitDirectory ||
+              worktree === undefined ||
+              worktree.generation !== initialGeneration ||
+              worktree.canonicalPath !== initialCanonicalPath ||
+              worktree.worktreeRevision !== command.expectedWorktreeRevision
+            ) {
+              return reject(
+                'stale',
+                'Worktree or Changed File state changed; refresh and choose again.',
+              );
+            }
+            const changes = command.fileIds.map((fileId) =>
+              worktree.changes.find((change) => change.fileId === fileId),
+            );
+            if (changes.some((change) => change === undefined)) {
+              return reject(
+                'stale',
+                'A Changed File target changed; refresh and choose again.',
+              );
+            }
+            const resolvedChanges = changes.filter(
+              (change): change is NonNullable<typeof change> =>
+                change !== undefined,
+            );
+            if (
+              command.kind === 'stage' &&
+              resolvedChanges.some((change) => change.kind === 'conflict')
+            ) {
+              return reject(
+                'unsupported_state',
+                'Conflict entries cannot be staged.',
+              );
+            }
+            const targetKindsMatch = resolvedChanges.every((change) =>
+              command.kind === 'stage'
+                ? change.kind === 'change' || change.kind === 'untracked'
+                : change.kind === 'staged_change',
+            );
+            if (
+              !targetKindsMatch ||
+              worktree.availability.kind !== 'available' ||
+              worktree.canonicalPath === null ||
+              worktree.freshness.kind !== 'fresh' ||
+              worktree.status?.inProgressOperation !== undefined ||
+              worktree.index?.locked !== false ||
+              worktree.gitLock.kind !== 'unlocked'
+            ) {
+              return reject(
+                'precondition_failed',
+                `${command.kind === 'stage' ? 'Stage' : 'Unstage'} requires current Changed Files in an available Worktree with no Git lock.`,
+              );
+            }
+            if (options.runGit === undefined) {
+              return reject(
+                'unsupported_state',
+                `${command.kind === 'stage' ? 'Stage' : 'Unstage'} is unavailable in this Repository Session.`,
+              );
+            }
+            if (options.inspectFileMutationTargets === undefined) {
+              return reject(
+                'unsupported_state',
+                `${command.kind === 'stage' ? 'Stage' : 'Unstage'} target inspection is unavailable in this Repository Session.`,
+              );
+            }
+            const baselineInspection = await options.inspectFileMutationTargets(
+              worktree,
+              resolvedChanges,
+              signal,
+            );
+            if (
+              baselineInspection.topologyEvidence !==
+                worktree[privateWorktreeIdentityEvidence] ||
+              baselineInspection.commonGitDirectory !==
+                initialCommonGitDirectory ||
+              baselineInspection.worktreePath !== initialCanonicalPath ||
+              baselineInspection.targetFingerprints.length !==
+                resolvedChanges.length ||
+              baselineInspection.targetFingerprints.some(
+                (fingerprint, index) =>
+                  fingerprint !== resolvedChanges[index]?.baselineFingerprint,
+              )
+            ) {
+              return reject(
+                'stale',
+                'Repository, Worktree, or Changed File state changed before inspection.',
+              );
+            }
+            if (baselineInspection.blockedBy !== null) {
+              return reject(
+                baselineInspection.blockedBy === 'index_lock'
+                  ? 'index_locked'
+                  : 'precondition_failed',
+                'A Git operation or lock blocks this file mutation.',
+              );
+            }
+            const effects = [];
+            for (let index = 0; index < resolvedChanges.length; index += 1) {
+              const target = resolvedChanges[index]!;
+              const inspection = await options.inspectFileMutationTargets(
+                worktree,
+                [target],
+                signal,
+              );
+              if (
+                inspection.commonGitDirectory !== initialCommonGitDirectory ||
+                inspection.worktreePath !== initialCanonicalPath ||
+                inspection.topologyEvidence !==
+                  baselineInspection.topologyEvidence ||
+                inspection.targetFingerprints[0] !== target.baselineFingerprint
+              ) {
+                if (effects.length === 0) {
+                  return reject(
+                    'stale',
+                    'Repository or Worktree identity changed; refresh and choose again.',
+                  );
+                }
+                effects.push(staleFileEffect(target));
+                continue;
+              }
+              if (inspection.blockedBy !== null) {
+                const code =
+                  inspection.blockedBy === 'index_lock'
+                    ? ('index_locked' as const)
+                    : ('precondition_failed' as const);
+                if (effects.length === 0) {
+                  return reject(
+                    code,
+                    'A Git operation or lock blocks this file mutation.',
+                  );
+                }
+                effects.push(blockedFileEffect(target, code));
+                continue;
+              }
+              const change = target;
+              const paths = [change.pathBytes];
+              if (change.previousPathBytes !== null) {
+                paths.push(change.previousPathBytes);
+              }
+              try {
+                await options.runGit(
+                  fileMutationArguments(
+                    command.kind,
+                    worktree.canonicalPath,
+                    worktree.head.objectId === null,
+                  ),
+                  false,
+                  undefined,
+                  signal,
+                  undefined,
+                  nulDelimitedPaths(paths),
+                );
+                effects.push({
+                  kind: 'completed' as const,
+                  label: effectLabel(change.displayPath),
+                  pathBytes: change.pathBytes,
+                  sourceKind: change.kind,
+                });
+              } catch (error) {
+                if (signal.aborted) throw error;
+                if (!isKnownGitFailure(error)) throw error;
+                effects.push({
+                  kind: 'failed_known' as const,
+                  label: effectLabel(change.displayPath),
+                  pathBytes: change.pathBytes,
+                  sourceKind: change.kind,
+                  code: 'process_failed' as const,
+                  message: `Git could not ${command.kind} ${effectLabel(change.displayPath)}.`,
+                });
+              }
+            }
+            return {
+              kind: 'attempted' as const,
+              effects,
+            };
+          },
+          async reconcile(context) {
+            const evidence =
+              context.execution.kind === 'returned'
+                ? context.execution.evidence
+                : undefined;
+            const reconciled = await observe(() =>
+              delegate.requestRefresh(),
+            ).catch(() => undefined);
+            if (
+              reconciled?.kind !== 'repository' ||
+              reconciled.repository.refresh.kind !== 'fresh'
+            ) {
+              return unknownFileMutation();
+            }
+            if (evidence?.kind === 'rejected') return evidence.result;
+            if (context.execution.kind !== 'returned') {
+              return unknownFileMutation();
+            }
+            if (
+              evidence?.kind === 'attempted' &&
+              reconciled.kind === 'repository'
+            ) {
+              const worktree = reconciled.repository.worktrees.find(
+                ({ worktreeId }) => worktreeId === command.worktreeId,
+              );
+              if (
+                reconciled.repository.repositoryId !== initialRepositoryId ||
+                reconciled.repository.commonGitDirectory !==
+                  initialCommonGitDirectory ||
+                worktree === undefined ||
+                worktree.generation !== initialGeneration ||
+                worktree.canonicalPath !== initialCanonicalPath ||
+                worktree.freshness.kind !== 'fresh'
+              ) {
+                return {
+                  kind: 'unknown_outcome',
+                  code: 'reconciliation_incomplete',
+                  message: 'Fresh Worktree state could not be established.',
+                  recoveryAvailable: true,
+                };
+              }
+              const effects = evidence.effects.map((effect) => {
+                if (
+                  effect.kind === 'failed_known' &&
+                  (effect.code === 'stale' ||
+                    effect.code === 'index_locked' ||
+                    effect.code === 'precondition_failed')
+                ) {
+                  return {
+                    kind: effect.kind,
+                    label: effect.label,
+                    code: effect.code,
+                    message: effect.message,
+                  };
+                }
+                const currentChanges = worktree.changes.filter((change) =>
+                  Buffer.from(change.pathBytes).equals(
+                    Buffer.from(effect.pathBytes),
+                  ),
+                );
+                const desiredState =
+                  command.kind === 'stage' && effect.sourceKind === 'untracked'
+                    ? currentChanges.some(
+                        ({ kind }) => kind === 'staged_change',
+                      )
+                    : !currentChanges.some(({ kind }) =>
+                        command.kind === 'stage'
+                          ? kind === 'change' || kind === 'untracked'
+                          : kind === 'staged_change',
+                      );
+                return desiredState
+                  ? { kind: 'succeeded' as const, label: effect.label }
+                  : effect.kind === 'failed_known'
+                    ? {
+                        kind: effect.kind,
+                        label: effect.label,
+                        code: effect.code,
+                        message: effect.message,
+                      }
+                    : {
+                        kind: 'failed_known' as const,
+                        label: effect.label,
+                        code: 'process_failed' as const,
+                        message: `Git did not ${command.kind} ${effect.label}.`,
+                      };
+              });
+              const succeeded = effects.filter(
+                (
+                  effect,
+                ): effect is Extract<
+                  (typeof effects)[number],
+                  { kind: 'succeeded' }
+                > => effect.kind === 'succeeded',
+              );
+              const failed = effects.filter(
+                (
+                  effect,
+                ): effect is Extract<
+                  (typeof effects)[number],
+                  { kind: 'failed_known' }
+                > => effect.kind === 'failed_known',
+              );
+              if (failed.length === 0) {
+                return {
+                  kind: 'succeeded',
+                  result: {
+                    kind: 'files',
+                    affectedCount: succeeded.length,
+                  },
+                };
+              }
+              if (succeeded.length > 0) {
+                return {
+                  kind: 'partial_success',
+                  message: `Some Changed Files could not be ${command.kind === 'stage' ? 'staged' : 'unstaged'}.`,
+                  effects,
+                };
+              }
+              const firstFailure = failed[0]!;
+              if (failed.every(({ code }) => code === 'stale')) {
+                return {
+                  kind: 'rejected',
+                  code: 'stale',
+                  message: 'Changed File targets changed before execution.',
+                };
+              }
+              return {
+                kind: 'failed_known',
+                code:
+                  firstFailure.code === 'stale' ||
+                  firstFailure.code === 'index_locked' ||
+                  firstFailure.code === 'precondition_failed'
+                    ? 'process_failed'
+                    : firstFailure.code,
+                message:
+                  failed.length === 1
+                    ? firstFailure.message
+                    : `No Changed Files could be ${command.kind === 'stage' ? 'staged' : 'unstaged'}.`,
+                effects: failed.length > 1 ? failed : undefined,
+              };
+            }
+            return unknownFileMutation();
+          },
+        });
+        if (admission.kind === 'closed') {
+          throw new Error('The Repository Session is closed.');
+        }
+        return {
+          operationId:
+            admission.kind === 'accepted'
+              ? admission.operation.operationId
+              : admission.result.operationId,
+          clientCommandId: request.clientCommandId,
+          disposition: 'accepted',
+        };
+      }
       if (request.command.kind !== 'switch_branch') {
         throw new Error(
           'This Repository Session does not support that command.',
@@ -888,12 +2002,12 @@ export function createRepositorySession(
     },
     async cancelOperation(operationId) {
       const result = await operations.cancel(operationId);
-      await observe(() => delegate.requestRefresh());
+      await observe(() => delegate.requestRefresh()).catch(() => undefined);
       return result;
     },
     async recoverOperation(operationId) {
       const result = await operations.recover(operationId);
-      await observe(() => delegate.requestRefresh());
+      await observe(() => delegate.requestRefresh()).catch(() => undefined);
       return result;
     },
     async close() {
@@ -905,6 +2019,112 @@ export function createRepositorySession(
       invalidations.close();
     },
   };
+}
+
+function nulDelimitedPaths(paths: readonly Uint8Array[]): Uint8Array {
+  const length = paths.reduce((total, path) => total + path.length + 1, 0);
+  const input = new Uint8Array(length);
+  let offset = 0;
+  for (const path of paths) {
+    input.set(path, offset);
+    offset += path.length + 1;
+  }
+  return input;
+}
+
+type ChangedFileTarget =
+  RepositorySnapshot['worktrees'][number]['changes'][number];
+
+function staleFileEffect(change: ChangedFileTarget) {
+  return {
+    kind: 'failed_known' as const,
+    label: effectLabel(change.displayPath),
+    pathBytes: change.pathBytes,
+    sourceKind: change.kind,
+    code: 'stale' as const,
+    message: `${effectLabel(change.displayPath)} changed before execution.`,
+  };
+}
+
+function blockedFileEffect(
+  change: ChangedFileTarget,
+  code: 'index_locked' | 'precondition_failed',
+) {
+  return {
+    kind: 'failed_known' as const,
+    label: effectLabel(change.displayPath),
+    pathBytes: change.pathBytes,
+    sourceKind: change.kind,
+    code,
+    message: `${effectLabel(change.displayPath)} is blocked by a Git operation or lock.`,
+  };
+}
+
+function isKnownGitFailure(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    'failure' in error &&
+    error.failure === 'command_failed' &&
+    'exitCode' in error &&
+    typeof error.exitCode === 'number'
+  );
+}
+
+function unknownFileMutation() {
+  return {
+    kind: 'unknown_outcome' as const,
+    code: 'reconciliation_incomplete' as const,
+    message: 'The file mutation could not be reconciled to fresh state.',
+    recoveryAvailable: true as const,
+  };
+}
+
+function fileMutationArguments(
+  kind: 'stage' | 'unstage',
+  worktreePath: string,
+  initialState: boolean,
+): readonly string[] {
+  if (kind === 'stage') {
+    return [
+      '--literal-pathspecs',
+      '-C',
+      worktreePath,
+      'add',
+      '-A',
+      '--pathspec-from-file=-',
+      '--pathspec-file-nul',
+    ];
+  }
+  if (initialState) {
+    return [
+      '--literal-pathspecs',
+      '-C',
+      worktreePath,
+      'rm',
+      '--cached',
+      '--force',
+      '--quiet',
+      '--ignore-unmatch',
+      '--pathspec-from-file=-',
+      '--pathspec-file-nul',
+    ];
+  }
+  return [
+    '--literal-pathspecs',
+    '-C',
+    worktreePath,
+    'reset',
+    '--quiet',
+    'HEAD',
+    '--pathspec-from-file=-',
+    '--pathspec-file-nul',
+  ];
+}
+
+function effectLabel(displayPath: string): string {
+  return displayPath.length <= 256
+    ? displayPath
+    : `${displayPath.slice(0, 253)}...`;
 }
 
 function escapedBytePath(path: Uint8Array): string {
@@ -932,6 +2152,67 @@ function remoteTrackingLocalName(
   if (remote === undefined) return null;
   const prefix = `refs/remotes/${remote.displayName}/`;
   return fullName.startsWith(prefix) ? fullName.slice(prefix.length) : null;
+}
+
+interface ConfiguredUpstreamTarget {
+  readonly remoteName: string;
+  readonly mergeRef: string;
+}
+
+async function readConfiguredUpstreamTarget(
+  worktree: RepositorySnapshot['worktrees'][number],
+  runGit: GitProcessRunner | undefined,
+): Promise<ConfiguredUpstreamTarget | null> {
+  if (
+    worktree.head.kind !== 'local_branch' ||
+    worktree.canonicalPath === null ||
+    runGit === undefined
+  ) {
+    return null;
+  }
+  const output = await runGit(
+    [
+      '-C',
+      worktree.canonicalPath,
+      'for-each-ref',
+      '--format=%(upstream:remotename)%00%(upstream:remoteref)',
+      worktree.head.fullName,
+    ],
+    false,
+  );
+  const [remoteName = '', mergeRefWithNewline = '', extra] = new TextDecoder(
+    'utf-8',
+    { fatal: true },
+  )
+    .decode(output)
+    .split('\0');
+  const mergeRef = mergeRefWithNewline.replace(/\r?\n$/u, '');
+  if (
+    extra !== undefined ||
+    remoteName.length === 0 ||
+    remoteName.includes('\n') ||
+    !mergeRef.startsWith('refs/heads/') ||
+    mergeRef.includes('\n')
+  ) {
+    return null;
+  }
+  return { remoteName, mergeRef };
+}
+
+function unknownRemoteOutcome() {
+  return {
+    kind: 'unknown_outcome' as const,
+    code: 'reconciliation_incomplete' as const,
+    message: 'The Remote Operation could not be reconciled to fresh Git state.',
+    recoveryAvailable: true as const,
+  };
+}
+
+function unknownRemoteReconciliation(): RemoteOperationResult {
+  return {
+    kind: 'unknown',
+    message: 'The exact Remote state could not be refreshed safely.',
+  };
 }
 
 async function detachedHeadWarning(

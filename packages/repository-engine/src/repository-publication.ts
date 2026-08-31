@@ -14,6 +14,7 @@ import type {
   RemoteId,
   WorktreeId,
 } from '@codex-git/protocol';
+import { createOpaqueIdAuthority } from '@codex-git/protocol';
 import type { OperationSessionSummary } from './operation-session.js';
 
 export interface RepositorySnapshot
@@ -281,7 +282,15 @@ export function publishDiscovery(
   previous?: RepositorySnapshot,
   observation?: RepositoryObservation,
 ): RepositorySnapshot {
-  return publishCandidate(discovery, previous, observation).snapshot;
+  const ids = createOpaqueIdAuthority();
+  return publishCandidate(
+    discovery,
+    previous,
+    observation,
+    undefined,
+    undefined,
+    () => ids.issue('native'),
+  ).snapshot;
 }
 
 function publishCandidate(

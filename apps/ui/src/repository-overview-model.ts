@@ -6,6 +6,7 @@ import type {
   BranchSearchResult,
   OperationResult,
   RefId,
+  RemoteId,
   RepositorySnapshot,
 } from '@codex-git/protocol';
 
@@ -56,8 +57,8 @@ export interface WorktreeOverviewSnapshot {
   readonly head: ProtocolWorktree['head'];
   readonly status: ProtocolWorktree['status'];
   readonly changes: ProtocolWorktree['changes'];
-  readonly upstream: UpstreamOverview;
   readonly nativeTargets: ProtocolWorktree['nativeTargets'];
+  readonly upstream: UpstreamOverview;
   readonly transition?: {
     readonly label: string;
     readonly progress: number | null;
@@ -106,6 +107,12 @@ export interface RepositoryOverviewSource {
   requestNativeAction(
     request: NativeActionRequest,
   ): Promise<NativeActionResult>;
+  mutateFiles(request: {
+    readonly kind: 'stage' | 'unstage';
+    readonly worktreeId: ProtocolWorktree['worktreeId'];
+    readonly expectedWorktreeRevision: number;
+    readonly fileIds: readonly FileId[];
+  }): Promise<OperationResult>;
   searchBranches(
     worktreeId: ProtocolWorktree['worktreeId'],
     query: string,
@@ -115,5 +122,12 @@ export interface RepositoryOverviewSource {
     readonly expectedWorktreeRevision: number;
     readonly expectedRefsRevision: number;
     readonly refId: RefId;
+  }): Promise<OperationResult>;
+  requestRemoteOperation(request: {
+    readonly kind: 'pull' | 'push' | 'publish';
+    readonly worktreeId: ProtocolWorktree['worktreeId'];
+    readonly expectedWorktreeRevision: number;
+    readonly expectedRefsRevision: number;
+    readonly remoteId?: RemoteId;
   }): Promise<OperationResult>;
 }
