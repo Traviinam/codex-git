@@ -461,6 +461,9 @@ describe('Repository Commit', () => {
 
   it('runs Commits concurrently in different Worktrees without crossing HEAD or Index', async () => {
     const repository = await repositoryWithCommit();
+    const mainBranch = (
+      await repository.git('branch', '--show-current')
+    ).stdout.trim();
     await repository.git('branch', 'linked');
     const linkedPath = `${repository.path}-concurrent-linked`;
     externalPaths.push(linkedPath);
@@ -531,9 +534,9 @@ describe('Repository Commit', () => {
     ).toMatchObject({
       kind: 'succeeded',
     });
-    expect((await repository.git('show', 'main:main.txt')).stdout).toBe(
-      'main\n',
-    );
+    expect(
+      (await repository.git('show', `${mainBranch}:main.txt`)).stdout,
+    ).toBe('main\n');
     expect((await repository.git('show', 'linked:linked.txt')).stdout).toBe(
       'linked\n',
     );
@@ -603,6 +606,9 @@ describe('Repository Commit', () => {
 
   it('lets native Git expected-old ref CAS reject a post-launch HEAD mutation', async () => {
     const repository = await repositoryWithCommit();
+    const attachedRef = (
+      await repository.git('symbolic-ref', 'HEAD')
+    ).stdout.trim();
     await writeFile(join(repository.path, 'README.md'), 'ref race\n');
     await repository.git('add', 'README.md');
     const parent = (await repository.git('rev-parse', 'HEAD')).stdout.trim();
@@ -641,12 +647,7 @@ describe('Repository Commit', () => {
     const externalCommit = (
       await repository.git('commit-tree', tree, '-p', parent, '-m', 'External')
     ).stdout.trim();
-    await repository.git(
-      'update-ref',
-      'refs/heads/main',
-      externalCommit,
-      parent,
-    );
+    await repository.git('update-ref', attachedRef, externalCommit, parent);
     await writeFile(releasePath, 'continue');
 
     expect(await session.recoverOperation(receipt.operationId)).toMatchObject({
