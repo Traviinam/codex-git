@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "checks": [
+    {
+      "id": "codex-host-smoke",
+      "status": "passed",
+      "performedAt": "2026-08-29T00:00:00.000Z",
+      "environment": "macOS with Codex Desktop 26.820.60940 (build 7119) and Chromium 151.0.7922.170",
+      "record": "docs/host-integration/codex-compatibility.md#manual-smoke-matrix",
+      "sourceRevision": "sha256:f10e7c0cf5a1cc78def9e811c0123698f352f578c6181781e43f893d8b316fc7",
+      "validUntil": "2026-09-29T00:00:00.000Z"
+    },
+    {
+      "id": "voiceover-keyboard-smoke",
+      "status": "pending",
+      "performedAt": null,
+      "environment": null,
+      "record": null,
+      "sourceRevision": null,
+      "validUntil": null
+    }
+  ]
+}

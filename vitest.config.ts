@@ -6,7 +6,7 @@ export default defineConfig({
     include: [
       'apps/**/*.test.{ts,tsx}',
       'packages/**/*.test.ts',
-      'tests/**/*.test.ts',
+      'tests/**/*.test.{ts,tsx}',
     ],
     restoreMocks: true,
   },
