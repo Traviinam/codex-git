@@ -8,8 +8,8 @@ describe('manual release evidence', () => {
       parseManualEvidence({
         checks: [
           {
-            codexVersion: '26.818.41509 (build 6962)',
-            environment: 'Codex Desktop 26.818.41509 (build 6962)',
+            codexVersion: '26.820.60940 (build 7119)',
+            environment: 'Codex Desktop 26.820.60940 (build 7119)',
             id: 'codex-host-smoke',
             performedAt: '2026-08-29T00:00:00.000Z',
             record:

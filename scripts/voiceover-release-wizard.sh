@@ -189,7 +189,7 @@ TOTAL_STAGES=4
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RECORD_PATH="$REPO_ROOT/docs/release/evidence/issue-16-manual-accessibility.md"
 EVIDENCE_PATH="$REPO_ROOT/docs/release/manual-evidence.json"
-SUPPORTED_CODEX_VERSION="26.818.41509 (build 6962)"
+SUPPORTED_CODEX_VERSION="26.820.60940 (build 7119)"
 
 require_confirm() {
   if ! confirm "$1"; then
@@ -208,7 +208,7 @@ open_url "x-apple.systempreferences:com.apple.Accessibility-Settings.extension"
 step "Open VoiceOver settings, then VoiceOver Utility → About, and note its displayed version."
 ask VOICEOVER_VERSION "VoiceOver / VoiceOver Utility version:"
 step "In Codex, open About Codex and copy the version including its build number."
-ask CODEX_VERSION "Codex Desktop version (for example 26.818.41509 (build 6962)):"
+ask CODEX_VERSION "Codex Desktop version (for example 26.820.60940 (build 7119)):"
 step "Record the Chromium/WebView version from the tested Codex compatibility profile."
 ask WEBVIEW_VERSION "Chromium/WebView version:"
 if [[ "$CODEX_VERSION" != "$SUPPORTED_CODEX_VERSION" ]]; then

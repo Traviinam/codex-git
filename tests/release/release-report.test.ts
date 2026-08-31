@@ -11,7 +11,7 @@ import type { ManualEvidenceRecord } from './manual-evidence.js';
 
 const environment: ReleaseEnvironment = {
   architecture: 'arm64',
-  codex: '26.818.41509 (build 6962)',
+  codex: '26.820.60940 (build 7119)',
   cpu: 'Test CPU',
   git: 'git version 2.50.1',
   memoryBytes: 16 * 1_024 ** 3,
@@ -40,8 +40,8 @@ const performance: ReferenceBenchmarkResult = {
 const manualEvidence: ManualEvidenceRecord = {
   checks: [
     {
-      codexVersion: '26.818.41509 (build 6962)',
-      environment: 'Codex Desktop 26.818.41509 (build 6962)',
+      codexVersion: '26.820.60940 (build 7119)',
+      environment: 'Codex Desktop 26.820.60940 (build 7119)',
       id: 'codex-host-smoke',
       performedAt: '2026-08-29T00:00:00.000Z',
       record:
@@ -51,9 +51,9 @@ const manualEvidence: ManualEvidenceRecord = {
       validUntil: '2026-09-29T00:00:00.000Z',
     },
     {
-      codexVersion: '26.818.41509 (build 6962)',
+      codexVersion: '26.820.60940 (build 7119)',
       environment:
-        'macOS 15.6; VoiceOver 10; Codex Desktop 26.818.41509 (build 6962)',
+        'macOS 15.6; VoiceOver 10; Codex Desktop 26.820.60940 (build 7119)',
       id: 'voiceover-keyboard-smoke',
       performedAt: '2026-09-01T00:00:00.000Z',
       record:
@@ -83,7 +83,7 @@ describe('release evidence report', () => {
     expect(report.markdown).toContain(
       '| AC-24 | Pass the supported release envelope | passed |',
     );
-    expect(report.markdown).toContain('Codex | 26.818.41509 (build 6962)');
+    expect(report.markdown).toContain('Codex | 26.820.60940 (build 7119)');
     expect(report.markdown).toContain(
       '| Full snapshot | 900 ms | 5000 ms | passed |',
     );
@@ -182,7 +182,7 @@ describe('release evidence report', () => {
       ...manualEvidence,
       checks: manualEvidence.checks.map((check) => ({
         ...check,
-        codexVersion: '26.820.60940 (build 7119)',
+        codexVersion: '26.818.41509 (build 6962)',
       })),
     };
 

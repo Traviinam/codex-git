@@ -100,28 +100,20 @@ describe('dedicated Codex remote renderer', () => {
     ]);
   });
 
-  it('accepts the exact build 6962 profile and installs its tested anchors', async () => {
+  it('rejects build 6962 before CDP because its live CSP blocks the surface frame', async () => {
     const session = new FixtureCdpSession({
       context: expectedContext,
       project: { id: 'project-42', label: 'codex-git' },
       status: 'attached',
     });
 
-    const connection = await connectDedicatedCodexRenderer(
-      { ...request, build: '6962', version: '26.818.41509' },
-      {
-        connect: async () => session,
-        createBindingName: () => '__codexGitNotify_fixture',
-      },
-    );
-
-    const installation = session.commands.find(
-      ({ method }) => method === 'Runtime.evaluate',
-    );
-    expect(installation?.params).toMatchObject({
-      expression: expect.stringContaining('.app-shell-left-panel'),
-    });
-    await connection.close();
+    await expect(
+      connectDedicatedCodexRenderer(
+        { ...request, build: '6962', version: '26.818.41509' },
+        { connect: async () => session },
+      ),
+    ).rejects.toThrow('Unsupported Codex Desktop version');
+    expect(session.commands).toEqual([]);
   });
 
   it('rejects a version and build from different tested profiles before CDP', async () => {
@@ -136,66 +128,7 @@ describe('dedicated Codex remote renderer', () => {
     expect(session.commands).toEqual([]);
   });
 
-  it('mounts build 6962 inside a full-width navigation section', async () => {
-    const dom = build6962Dom();
-    const session = new FixtureCdpSession(
-      { status: 'not-ready' },
-      'Chrome/151.0.7922.170',
-      dom,
-    );
-
-    const connection = await connectDedicatedCodexRenderer(
-      { ...request, build: '6962', version: '26.818.41509' },
-      {
-        connect: async () => session,
-        createBindingName: () => '__codexGitNotify_fixture',
-      },
-    );
-
-    const entry = dom.window.document.querySelector(
-      '[data-codex-git-sidebar-entry]',
-    );
-    const projects = dom.window.document.querySelector(
-      'section:has([data-app-action-sidebar-section-toggle])',
-    );
-    expect(entry?.classList.contains('sidebar-item')).toBe(true);
-    expect(entry?.parentElement?.tagName).toBe('SECTION');
-    expect(entry?.parentElement?.nextElementSibling).toBe(projects);
-
-    await connection.close();
-    expect(
-      dom.window.document.querySelector('[data-codex-git-sidebar-entry]'),
-    ).toBeNull();
-  });
 });
-
-function build6962Dom(): JSDOM {
-  return new JSDOM(
-    `<aside class="app-shell-left-panel">
-      <div>
-        <nav>
-          <button type="button" class="mode-switch">Codex</button>
-          <div>
-            <button type="button" class="sidebar-item flex w-full">Sites</button>
-          </div>
-          <div>
-            <section class="relative px-row-x">
-              <button type="button" data-app-action-sidebar-section-toggle>Projects</button>
-              <div
-                aria-current="page"
-                data-app-action-sidebar-project-id="project-42"
-                data-app-action-sidebar-project-label="codex-git"
-                data-app-action-sidebar-project-row
-              ></div>
-            </section>
-          </div>
-        </nav>
-      </div>
-    </aside>
-    <main data-app-shell-main-surface="default">Native task</main>`,
-    { runScripts: 'outside-only', url: 'app://-/index.html' },
-  );
-}
 
 const expectedContext = {
   projectPath: '/Users/example/codex-git',

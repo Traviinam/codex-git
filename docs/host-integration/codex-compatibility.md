@@ -33,10 +33,9 @@ endpoint, or record it in ordinary logs.
 
 ## Tested profile
 
-| Codex Desktop                 | Chromium framework | Required anchors                                                                                                           | Evidence                                                                                                                                                                        |
-| ----------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `26.820.60940` (build `7119`) | `151.0.7922.170`   | `#app-shell-sidebar`; `[data-app-shell-main-surface="default"]`                                                            | Installed renderer bundle inspection plus automated DOM fixture coverage                                                                                                        |
-| `26.818.41509` (build `6962`) | `151.0.7922.170`   | `.app-shell-left-panel`; selected Project section; `button.sidebar-item.w-full`; `[data-app-shell-main-surface="default"]` | App bundle SHA-256 `8eb91bd9efbf9a4dd04b9b0afdbfcb4e0bab5da18c1919ad74ca327c00c7e791`; live isolated visible-entry/attachment/teardown probes; automated exact-profile fixtures |
+| Codex Desktop                 | Chromium framework | Required anchors                                                | Evidence                                                                 |
+| ----------------------------- | ------------------ | --------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `26.820.60940` (build `7119`) | `151.0.7922.170`   | `#app-shell-sidebar`; `[data-app-shell-main-surface="default"]` | Installed renderer bundle inspection plus automated DOM fixture coverage |
 
 The automated exact-profile matrix covers read-only probing, fail-closed fallback,
 transactional attachment, one-entry mounting, native navigation, repeat
@@ -52,10 +51,9 @@ matrix; do not widen selectors to make an unknown build appear compatible.
 
 This matrix passed on 2026-08-29 against a disposable dedicated profile using
 Codex Desktop `26.820.60940` (build `7119`) and Chromium `151.0.7922.170`.
-The current release profile, Codex Desktop `26.818.41509` (build `6962`), has
-passed isolated runtime attachment and teardown but still requires the human
-host, keyboard, and VoiceOver record produced by
-`scripts/voiceover-release-wizard.sh` before the release gate can pass.
+Build `6962` is intentionally excluded: live validation showed its `app://`
+Content Security Policy blocks the loopback Git Surface frame even after the
+scoped CDP bypass command. Unsupported builds must use the standalone surface.
 
 The human portion of the matrix is intentionally limited to behavior that
 requires an actual Codex/macOS session. The release wizard records these checks:

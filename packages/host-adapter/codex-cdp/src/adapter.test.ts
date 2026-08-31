@@ -94,8 +94,9 @@ describe('CodexCdpHostAdapter', () => {
     expect(nativeSurface?.hidden).toBe(false);
   });
 
-  it('uses the tested left-panel anchor for Codex Desktop build 6962', async () => {
+  it('fails closed for build 6962 after live CSP validation failed', async () => {
     const dom = build6962CompatibleDom();
+    const before = dom.window.document.documentElement.outerHTML;
 
     const result = await new CodexCdpHostAdapter({
       rendererSource: new FixtureRendererSource(
@@ -106,21 +107,11 @@ describe('CodexCdpHostAdapter', () => {
       url: new URL('http://127.0.0.1:4173'),
     });
 
-    expect(result.kind).toBe('attached');
-    const entry = dom.window.document.querySelector(
-      '[data-codex-git-sidebar-entry]',
-    );
-    expect(entry?.classList.contains('w-full')).toBe(true);
-    expect(entry?.parentElement?.tagName).toBe('SECTION');
-    expect(entry?.parentElement?.nextElementSibling).toBe(
-      dom.window.document.querySelector(
-        'section:has([data-app-action-sidebar-project-row][aria-current="page"])',
-      ),
-    );
-    if (result.kind === 'attached') await result.connection.close();
-    expect(
-      dom.window.document.querySelector('[data-codex-git-sidebar-entry-host]'),
-    ).toBeNull();
+    expect(result).toMatchObject({
+      kind: 'standalone-required',
+      reason: { code: 'incompatible-host' },
+    });
+    expect(dom.window.document.documentElement.outerHTML).toBe(before);
   });
 
   it('rejects a version and build from different tested profiles', async () => {
