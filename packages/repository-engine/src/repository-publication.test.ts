@@ -43,6 +43,7 @@ function worktree(
   return {
     worktreeId: id as DiscoveredWorktree['worktreeId'],
     generation: `generation_${role}` as DiscoveredWorktree['generation'],
+    privateIdentityEvidence: `identity-${role}`,
     displayPath: canonicalPath,
     canonicalPath: canonicalPath as DiscoveredWorktree['canonicalPath'],
     canonicalPathBytes: Buffer.from(canonicalPath),

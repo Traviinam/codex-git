@@ -4,6 +4,7 @@ import type {
   FileId,
   NativeActionRequest,
   NativeActionResult,
+  OperationResult,
   RefId,
   RemoteId,
   WorktreeId,
@@ -66,6 +67,7 @@ export interface RepositoryStoreSnapshot {
   readonly focusRecoveryRevision: number;
   readonly branchPicker: BranchPickerState;
   readonly remoteOperation: RemoteOperationState;
+  readonly fileMutationResult: OperationResult | null;
 }
 
 export interface RepositoryStore {
@@ -84,6 +86,7 @@ export interface RepositoryStore {
   requestNativeAction(
     request: NativeActionRequest,
   ): Promise<NativeActionResult>;
+  mutateFiles(kind: 'stage' | 'unstage', fileIds: readonly FileId[]): void;
   openBranchPicker(): void;
   closeBranchPicker(): void;
   setBranchQuery(query: string): void;
@@ -112,6 +115,10 @@ export function createRepositoryStore(
   let branchPicker: BranchPickerState = { kind: 'closed' };
   let branchRequestGeneration = 0;
   let remoteOperation: RemoteOperationState = { kind: 'idle' };
+  let fileMutationResult: OperationResult | null = null;
+  let fileFollow:
+    | { readonly displayPath: string; readonly kind: 'stage' | 'unstage' }
+    | undefined;
   let storeSnapshot = buildSnapshot();
   let disposed = false;
 
@@ -152,10 +159,22 @@ export function createRepositoryStore(
       selectedFileId !== null &&
       !selected.changes.some(({ fileId }) => fileId === selectedFileId)
     ) {
-      selectedFileId = null;
+      const followed =
+        fileFollow === undefined
+          ? undefined
+          : selected.changes.find(
+              ({ displayPath, kind }) =>
+                displayPath === fileFollow?.displayPath &&
+                (fileFollow.kind === 'stage'
+                  ? kind === 'staged_change'
+                  : kind === 'change' || kind === 'untracked'),
+            );
+      selectedFileId = followed?.fileId ?? null;
       clearDiff();
-      selectionNotice =
-        'Changed Files were refreshed; the previous file selection was cleared.';
+      selectionNotice = followed
+        ? `${followed.displayPath} moved to its new Change Group.`
+        : 'Changed Files were refreshed; the previous file selection was cleared.';
+      fileFollow = undefined;
     } else {
       selectionNotice = null;
     }
@@ -257,6 +276,40 @@ export function createRepositoryStore(
             message: 'The Repository view is no longer active.',
           })
         : source.requestNativeAction(request),
+    mutateFiles(kind, fileIds) {
+      if (disposed || fileIds.length === 0 || selectedWorktreeId === null) {
+        return;
+      }
+      const worktree = findWorktree(sourceState, selectedWorktreeId);
+      if (worktree === null) return;
+      const selectedChange = worktree.changes.find(
+        ({ fileId }) => fileId === selectedFileId && fileIds.includes(fileId),
+      );
+      fileFollow =
+        selectedChange === undefined
+          ? undefined
+          : { displayPath: selectedChange.displayPath, kind };
+      void source
+        .mutateFiles({
+          kind,
+          worktreeId: worktree.worktreeId,
+          expectedWorktreeRevision: worktree.worktreeRevision,
+          fileIds,
+        })
+        .then((result) => {
+          if (disposed) return;
+          fileMutationResult = result;
+          emit();
+        })
+        .catch(() => {
+          if (disposed) return;
+          selectionNotice = 'The file mutation could not be submitted.';
+          emit();
+        })
+        .finally(() => {
+          fileFollow = undefined;
+        });
+    },
     openBranchPicker() {
       if (disposed || selectedWorktreeId === null) return;
       void loadBranches('');
@@ -437,6 +490,7 @@ export function createRepositoryStore(
       focusRecoveryRevision,
       branchPicker,
       remoteOperation,
+      fileMutationResult,
     };
   }
 

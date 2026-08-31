@@ -25,6 +25,7 @@ import {
   type OperationSessionSummary,
 } from './operation-session.js';
 import type { RemoteOperationResult } from './remote-operation.js';
+import type { FileMutationInspector } from './file-mutation-inspection.js';
 import type {
   RepositoryInvalidation,
   RepositoryOpenResult,
@@ -33,6 +34,7 @@ import type {
   RepositorySnapshot,
   ScopedRepositoryPublicationSession,
 } from './repository-publication.js';
+import { privateWorktreeIdentityEvidence } from './observation-publication.js';
 
 const OPERATION_TIMEOUT_MILLISECONDS = 30_000;
 
@@ -74,6 +76,7 @@ export interface RepositorySessionOptions {
     request: import('./remote-operation.js').RemoteOperationRequest,
     signal: AbortSignal,
   ) => Promise<import('./remote-operation.js').RemoteOperationResult>;
+  readonly inspectFileMutationTargets?: FileMutationInspector;
   readonly diff?: (
     worktree: RepositorySnapshot['worktrees'][number],
     fileId: FileId,
@@ -132,6 +135,8 @@ type GitProcessRunner = (
   allowLargeOutput: boolean,
   acceptedEmptyExitCode?: 1,
   signal?: AbortSignal,
+  maximumOutputBytes?: number,
+  input?: Uint8Array,
 ) => Promise<Uint8Array>;
 
 interface BranchBinding {
@@ -1376,6 +1381,376 @@ export function createRepositorySession(
           disposition: 'accepted',
         };
       }
+      if (
+        request.command.kind === 'stage' ||
+        request.command.kind === 'unstage'
+      ) {
+        const command = request.command;
+        const initial = latestBase?.worktrees.find(
+          ({ worktreeId }) => worktreeId === command.worktreeId,
+        );
+        if (initial === undefined) {
+          throw new Error(
+            'Stage and Unstage require a current Worktree snapshot.',
+          );
+        }
+        const initialRepositoryId = latestBase?.repositoryId;
+        const initialCommonGitDirectory = latestBase?.commonGitDirectory;
+        const initialGeneration = initial.generation;
+        const initialCanonicalPath = initial.canonicalPath;
+        const admission = await operations.dispatch({
+          kind: command.kind,
+          worktreeGeneration: initial.generation,
+          async reconcileBusy() {
+            await observe(() => delegate.requestRefresh()).catch(
+              () => undefined,
+            );
+          },
+          async execute({ signal }) {
+            const current = await observe(() =>
+              delegate.requestRefresh(),
+            ).catch(() => undefined);
+            const worktree =
+              current?.kind === 'repository'
+                ? current.repository.worktrees.find(
+                    ({ worktreeId }) => worktreeId === command.worktreeId,
+                  )
+                : undefined;
+            if (
+              current?.kind !== 'repository' ||
+              current.repository.repositoryId !== initialRepositoryId ||
+              current.repository.commonGitDirectory !==
+                initialCommonGitDirectory ||
+              worktree === undefined ||
+              worktree.generation !== initialGeneration ||
+              worktree.canonicalPath !== initialCanonicalPath ||
+              worktree.worktreeRevision !== command.expectedWorktreeRevision
+            ) {
+              return reject(
+                'stale',
+                'Worktree or Changed File state changed; refresh and choose again.',
+              );
+            }
+            const changes = command.fileIds.map((fileId) =>
+              worktree.changes.find((change) => change.fileId === fileId),
+            );
+            if (changes.some((change) => change === undefined)) {
+              return reject(
+                'stale',
+                'A Changed File target changed; refresh and choose again.',
+              );
+            }
+            const resolvedChanges = changes.filter(
+              (change): change is NonNullable<typeof change> =>
+                change !== undefined,
+            );
+            if (
+              command.kind === 'stage' &&
+              resolvedChanges.some((change) => change.kind === 'conflict')
+            ) {
+              return reject(
+                'unsupported_state',
+                'Conflict entries cannot be staged.',
+              );
+            }
+            const targetKindsMatch = resolvedChanges.every((change) =>
+              command.kind === 'stage'
+                ? change.kind === 'change' || change.kind === 'untracked'
+                : change.kind === 'staged_change',
+            );
+            if (
+              !targetKindsMatch ||
+              worktree.availability.kind !== 'available' ||
+              worktree.canonicalPath === null ||
+              worktree.freshness.kind !== 'fresh' ||
+              worktree.status?.inProgressOperation !== undefined ||
+              worktree.index?.locked !== false ||
+              worktree.gitLock.kind !== 'unlocked'
+            ) {
+              return reject(
+                'precondition_failed',
+                `${command.kind === 'stage' ? 'Stage' : 'Unstage'} requires current Changed Files in an available Worktree with no Git lock.`,
+              );
+            }
+            if (options.runGit === undefined) {
+              return reject(
+                'unsupported_state',
+                `${command.kind === 'stage' ? 'Stage' : 'Unstage'} is unavailable in this Repository Session.`,
+              );
+            }
+            if (options.inspectFileMutationTargets === undefined) {
+              return reject(
+                'unsupported_state',
+                `${command.kind === 'stage' ? 'Stage' : 'Unstage'} target inspection is unavailable in this Repository Session.`,
+              );
+            }
+            const baselineInspection = await options.inspectFileMutationTargets(
+              worktree,
+              resolvedChanges,
+              signal,
+            );
+            if (
+              baselineInspection.topologyEvidence !==
+                worktree[privateWorktreeIdentityEvidence] ||
+              baselineInspection.commonGitDirectory !==
+                initialCommonGitDirectory ||
+              baselineInspection.worktreePath !== initialCanonicalPath ||
+              baselineInspection.targetFingerprints.length !==
+                resolvedChanges.length ||
+              baselineInspection.targetFingerprints.some(
+                (fingerprint, index) =>
+                  fingerprint !== resolvedChanges[index]?.baselineFingerprint,
+              )
+            ) {
+              return reject(
+                'stale',
+                'Repository, Worktree, or Changed File state changed before inspection.',
+              );
+            }
+            if (baselineInspection.blockedBy !== null) {
+              return reject(
+                baselineInspection.blockedBy === 'index_lock'
+                  ? 'index_locked'
+                  : 'precondition_failed',
+                'A Git operation or lock blocks this file mutation.',
+              );
+            }
+            const effects = [];
+            for (let index = 0; index < resolvedChanges.length; index += 1) {
+              const target = resolvedChanges[index]!;
+              const inspection = await options.inspectFileMutationTargets(
+                worktree,
+                [target],
+                signal,
+              );
+              if (
+                inspection.commonGitDirectory !== initialCommonGitDirectory ||
+                inspection.worktreePath !== initialCanonicalPath ||
+                inspection.topologyEvidence !==
+                  baselineInspection.topologyEvidence ||
+                inspection.targetFingerprints[0] !== target.baselineFingerprint
+              ) {
+                if (effects.length === 0) {
+                  return reject(
+                    'stale',
+                    'Repository or Worktree identity changed; refresh and choose again.',
+                  );
+                }
+                effects.push(staleFileEffect(target));
+                continue;
+              }
+              if (inspection.blockedBy !== null) {
+                const code =
+                  inspection.blockedBy === 'index_lock'
+                    ? ('index_locked' as const)
+                    : ('precondition_failed' as const);
+                if (effects.length === 0) {
+                  return reject(
+                    code,
+                    'A Git operation or lock blocks this file mutation.',
+                  );
+                }
+                effects.push(blockedFileEffect(target, code));
+                continue;
+              }
+              const change = target;
+              const paths = [change.pathBytes];
+              if (change.previousPathBytes !== null) {
+                paths.push(change.previousPathBytes);
+              }
+              try {
+                await options.runGit(
+                  fileMutationArguments(
+                    command.kind,
+                    worktree.canonicalPath,
+                    worktree.head.objectId === null,
+                  ),
+                  false,
+                  undefined,
+                  signal,
+                  undefined,
+                  nulDelimitedPaths(paths),
+                );
+                effects.push({
+                  kind: 'completed' as const,
+                  label: effectLabel(change.displayPath),
+                  pathBytes: change.pathBytes,
+                  sourceKind: change.kind,
+                });
+              } catch (error) {
+                if (signal.aborted) throw error;
+                if (!isKnownGitFailure(error)) throw error;
+                effects.push({
+                  kind: 'failed_known' as const,
+                  label: effectLabel(change.displayPath),
+                  pathBytes: change.pathBytes,
+                  sourceKind: change.kind,
+                  code: 'process_failed' as const,
+                  message: `Git could not ${command.kind} ${effectLabel(change.displayPath)}.`,
+                });
+              }
+            }
+            return {
+              kind: 'attempted' as const,
+              effects,
+            };
+          },
+          async reconcile(context) {
+            const evidence =
+              context.execution.kind === 'returned'
+                ? context.execution.evidence
+                : undefined;
+            const reconciled = await observe(() =>
+              delegate.requestRefresh(),
+            ).catch(() => undefined);
+            if (
+              reconciled?.kind !== 'repository' ||
+              reconciled.repository.refresh.kind !== 'fresh'
+            ) {
+              return unknownFileMutation();
+            }
+            if (evidence?.kind === 'rejected') return evidence.result;
+            if (context.execution.kind !== 'returned') {
+              return unknownFileMutation();
+            }
+            if (
+              evidence?.kind === 'attempted' &&
+              reconciled.kind === 'repository'
+            ) {
+              const worktree = reconciled.repository.worktrees.find(
+                ({ worktreeId }) => worktreeId === command.worktreeId,
+              );
+              if (
+                reconciled.repository.repositoryId !== initialRepositoryId ||
+                reconciled.repository.commonGitDirectory !==
+                  initialCommonGitDirectory ||
+                worktree === undefined ||
+                worktree.generation !== initialGeneration ||
+                worktree.canonicalPath !== initialCanonicalPath ||
+                worktree.freshness.kind !== 'fresh'
+              ) {
+                return {
+                  kind: 'unknown_outcome',
+                  code: 'reconciliation_incomplete',
+                  message: 'Fresh Worktree state could not be established.',
+                  recoveryAvailable: true,
+                };
+              }
+              const effects = evidence.effects.map((effect) => {
+                if (
+                  effect.kind === 'failed_known' &&
+                  (effect.code === 'stale' ||
+                    effect.code === 'index_locked' ||
+                    effect.code === 'precondition_failed')
+                ) {
+                  return {
+                    kind: effect.kind,
+                    label: effect.label,
+                    code: effect.code,
+                    message: effect.message,
+                  };
+                }
+                const currentChanges = worktree.changes.filter((change) =>
+                  Buffer.from(change.pathBytes).equals(
+                    Buffer.from(effect.pathBytes),
+                  ),
+                );
+                const desiredState =
+                  command.kind === 'stage' && effect.sourceKind === 'untracked'
+                    ? currentChanges.some(
+                        ({ kind }) => kind === 'staged_change',
+                      )
+                    : !currentChanges.some(({ kind }) =>
+                        command.kind === 'stage'
+                          ? kind === 'change' || kind === 'untracked'
+                          : kind === 'staged_change',
+                      );
+                return desiredState
+                  ? { kind: 'succeeded' as const, label: effect.label }
+                  : effect.kind === 'failed_known'
+                    ? {
+                        kind: effect.kind,
+                        label: effect.label,
+                        code: effect.code,
+                        message: effect.message,
+                      }
+                    : {
+                        kind: 'failed_known' as const,
+                        label: effect.label,
+                        code: 'process_failed' as const,
+                        message: `Git did not ${command.kind} ${effect.label}.`,
+                      };
+              });
+              const succeeded = effects.filter(
+                (
+                  effect,
+                ): effect is Extract<
+                  (typeof effects)[number],
+                  { kind: 'succeeded' }
+                > => effect.kind === 'succeeded',
+              );
+              const failed = effects.filter(
+                (
+                  effect,
+                ): effect is Extract<
+                  (typeof effects)[number],
+                  { kind: 'failed_known' }
+                > => effect.kind === 'failed_known',
+              );
+              if (failed.length === 0) {
+                return {
+                  kind: 'succeeded',
+                  result: {
+                    kind: 'files',
+                    affectedCount: succeeded.length,
+                  },
+                };
+              }
+              if (succeeded.length > 0) {
+                return {
+                  kind: 'partial_success',
+                  message: `Some Changed Files could not be ${command.kind === 'stage' ? 'staged' : 'unstaged'}.`,
+                  effects,
+                };
+              }
+              const firstFailure = failed[0]!;
+              if (failed.every(({ code }) => code === 'stale')) {
+                return {
+                  kind: 'rejected',
+                  code: 'stale',
+                  message: 'Changed File targets changed before execution.',
+                };
+              }
+              return {
+                kind: 'failed_known',
+                code:
+                  firstFailure.code === 'stale' ||
+                  firstFailure.code === 'index_locked' ||
+                  firstFailure.code === 'precondition_failed'
+                    ? 'process_failed'
+                    : firstFailure.code,
+                message:
+                  failed.length === 1
+                    ? firstFailure.message
+                    : `No Changed Files could be ${command.kind === 'stage' ? 'staged' : 'unstaged'}.`,
+                effects: failed.length > 1 ? failed : undefined,
+              };
+            }
+            return unknownFileMutation();
+          },
+        });
+        if (admission.kind === 'closed') {
+          throw new Error('The Repository Session is closed.');
+        }
+        return {
+          operationId:
+            admission.kind === 'accepted'
+              ? admission.operation.operationId
+              : admission.result.operationId,
+          clientCommandId: request.clientCommandId,
+          disposition: 'accepted',
+        };
+      }
       if (request.command.kind !== 'switch_branch') {
         throw new Error(
           'This Repository Session does not support that command.',
@@ -1609,12 +1984,12 @@ export function createRepositorySession(
     },
     async cancelOperation(operationId) {
       const result = await operations.cancel(operationId);
-      await observe(() => delegate.requestRefresh());
+      await observe(() => delegate.requestRefresh()).catch(() => undefined);
       return result;
     },
     async recoverOperation(operationId) {
       const result = await operations.recover(operationId);
-      await observe(() => delegate.requestRefresh());
+      await observe(() => delegate.requestRefresh()).catch(() => undefined);
       return result;
     },
     async close() {
@@ -1626,6 +2001,112 @@ export function createRepositorySession(
       invalidations.close();
     },
   };
+}
+
+function nulDelimitedPaths(paths: readonly Uint8Array[]): Uint8Array {
+  const length = paths.reduce((total, path) => total + path.length + 1, 0);
+  const input = new Uint8Array(length);
+  let offset = 0;
+  for (const path of paths) {
+    input.set(path, offset);
+    offset += path.length + 1;
+  }
+  return input;
+}
+
+type ChangedFileTarget =
+  RepositorySnapshot['worktrees'][number]['changes'][number];
+
+function staleFileEffect(change: ChangedFileTarget) {
+  return {
+    kind: 'failed_known' as const,
+    label: effectLabel(change.displayPath),
+    pathBytes: change.pathBytes,
+    sourceKind: change.kind,
+    code: 'stale' as const,
+    message: `${effectLabel(change.displayPath)} changed before execution.`,
+  };
+}
+
+function blockedFileEffect(
+  change: ChangedFileTarget,
+  code: 'index_locked' | 'precondition_failed',
+) {
+  return {
+    kind: 'failed_known' as const,
+    label: effectLabel(change.displayPath),
+    pathBytes: change.pathBytes,
+    sourceKind: change.kind,
+    code,
+    message: `${effectLabel(change.displayPath)} is blocked by a Git operation or lock.`,
+  };
+}
+
+function isKnownGitFailure(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    'failure' in error &&
+    error.failure === 'command_failed' &&
+    'exitCode' in error &&
+    typeof error.exitCode === 'number'
+  );
+}
+
+function unknownFileMutation() {
+  return {
+    kind: 'unknown_outcome' as const,
+    code: 'reconciliation_incomplete' as const,
+    message: 'The file mutation could not be reconciled to fresh state.',
+    recoveryAvailable: true as const,
+  };
+}
+
+function fileMutationArguments(
+  kind: 'stage' | 'unstage',
+  worktreePath: string,
+  initialState: boolean,
+): readonly string[] {
+  if (kind === 'stage') {
+    return [
+      '--literal-pathspecs',
+      '-C',
+      worktreePath,
+      'add',
+      '-A',
+      '--pathspec-from-file=-',
+      '--pathspec-file-nul',
+    ];
+  }
+  if (initialState) {
+    return [
+      '--literal-pathspecs',
+      '-C',
+      worktreePath,
+      'rm',
+      '--cached',
+      '--force',
+      '--quiet',
+      '--ignore-unmatch',
+      '--pathspec-from-file=-',
+      '--pathspec-file-nul',
+    ];
+  }
+  return [
+    '--literal-pathspecs',
+    '-C',
+    worktreePath,
+    'reset',
+    '--quiet',
+    'HEAD',
+    '--pathspec-from-file=-',
+    '--pathspec-file-nul',
+  ];
+}
+
+function effectLabel(displayPath: string): string {
+  return displayPath.length <= 256
+    ? displayPath
+    : `${displayPath.slice(0, 253)}...`;
 }
 
 function escapedBytePath(path: Uint8Array): string {

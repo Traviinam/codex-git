@@ -13,10 +13,15 @@ export function ChangeGroups({
   worktree,
   selectedFileId,
   onSelect,
+  onMutate,
 }: {
   readonly worktree: WorktreeOverviewSnapshot;
   readonly selectedFileId: FileId | null;
   readonly onSelect: (fileId: FileId) => void;
+  readonly onMutate: (
+    kind: 'stage' | 'unstage',
+    fileIds: readonly FileId[],
+  ) => void;
 }) {
   if (worktree.changes.length === 0) {
     return <p>No Changed Files in this Worktree.</p>;
@@ -33,6 +38,20 @@ export function ChangeGroups({
             <h4>
               {group.label} <span>{changes.length}</span>
             </h4>
+            {group.kind === 'conflict' ? null : (
+              <button
+                aria-label={`${group.kind === 'staged_change' ? 'Unstage' : 'Stage'} all ${group.label}`}
+                type="button"
+                onClick={() =>
+                  onMutate(
+                    group.kind === 'staged_change' ? 'unstage' : 'stage',
+                    changes.map(({ fileId }) => fileId),
+                  )
+                }
+              >
+                {group.kind === 'staged_change' ? 'Unstage all' : 'Stage all'}
+              </button>
+            )}
             <ul>
               {changes.map((change) => (
                 <li key={change.fileId}>
@@ -47,6 +66,20 @@ export function ChangeGroups({
                       <small>renamed from {change.previousDisplayPath}</small>
                     )}
                   </button>
+                  {group.kind === 'conflict' ? null : (
+                    <button
+                      aria-label={`${group.kind === 'staged_change' ? 'Unstage' : 'Stage'} ${change.displayPath}`}
+                      type="button"
+                      onClick={() =>
+                        onMutate(
+                          group.kind === 'staged_change' ? 'unstage' : 'stage',
+                          [change.fileId],
+                        )
+                      }
+                    >
+                      {group.kind === 'staged_change' ? 'Unstage' : 'Stage'}
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>

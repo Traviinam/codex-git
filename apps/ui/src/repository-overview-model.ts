@@ -107,6 +107,12 @@ export interface RepositoryOverviewSource {
   requestNativeAction(
     request: NativeActionRequest,
   ): Promise<NativeActionResult>;
+  mutateFiles(request: {
+    readonly kind: 'stage' | 'unstage';
+    readonly worktreeId: ProtocolWorktree['worktreeId'];
+    readonly expectedWorktreeRevision: number;
+    readonly fileIds: readonly FileId[];
+  }): Promise<OperationResult>;
   searchBranches(
     worktreeId: ProtocolWorktree['worktreeId'],
     query: string,

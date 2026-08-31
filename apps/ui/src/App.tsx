@@ -13,6 +13,9 @@ const loadingStore = createRepositoryStore({
       kind: 'unavailable',
       message: 'No Repository is loaded.',
     }),
+  mutateFiles: async () => {
+    throw new Error('File mutations are unavailable while loading.');
+  },
   searchBranches: async () => ({ refsRevision: 0, candidates: [] }),
   switchBranch: async () => {
     throw new Error('Branch switching is unavailable while loading.');

@@ -103,6 +103,9 @@ function createMutableFixture(
           message: 'Native actions are not installed in this fixture.',
         };
       },
+      async mutateFiles() {
+        throw new Error('File mutations are not configured for this fixture.');
+      },
       async searchBranches() {
         return { refsRevision: 0, candidates: [] };
       },
