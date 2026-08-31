@@ -98,6 +98,42 @@ describe('dedicated Codex remote renderer', () => {
       'Browser.getVersion',
     ]);
   });
+
+  it('accepts the exact build 6962 profile and installs its tested anchors', async () => {
+    const session = new FixtureCdpSession({
+      context: expectedContext,
+      project: { id: 'project-42', label: 'codex-git' },
+      status: 'attached',
+    });
+
+    const connection = await connectDedicatedCodexRenderer(
+      { ...request, build: '6962', version: '26.818.41509' },
+      {
+        connect: async () => session,
+        createBindingName: () => '__codexGitNotify_fixture',
+      },
+    );
+
+    const installation = session.commands.find(
+      ({ method }) => method === 'Runtime.evaluate',
+    );
+    expect(installation?.params).toMatchObject({
+      expression: expect.stringContaining('.app-shell-left-panel'),
+    });
+    await connection.close();
+  });
+
+  it('rejects a version and build from different tested profiles before CDP', async () => {
+    const session = new FixtureCdpSession({ status: 'attached' });
+
+    await expect(
+      connectDedicatedCodexRenderer(
+        { ...request, build: '6962' },
+        { connect: async () => session },
+      ),
+    ).rejects.toThrow('Unsupported Codex Desktop version');
+    expect(session.commands).toEqual([]);
+  });
 });
 
 const expectedContext = {

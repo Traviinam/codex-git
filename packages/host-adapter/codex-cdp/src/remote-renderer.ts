@@ -12,6 +12,10 @@ import {
   type CdpSession,
 } from './cdp-session.js';
 import { acquireDedicatedRendererCspBypass } from './csp-bypass.js';
+import {
+  findCodexCompatibilityProfile,
+  type CodexCompatibilityProfile,
+} from './compatibility-profile.js';
 import type {
   ConnectDedicatedRendererRequest,
   DedicatedProjectIdentity,
@@ -19,10 +23,6 @@ import type {
   DedicatedRendererEvent,
 } from './dedicated-adapter.js';
 import type { CspBypassLease } from './renderer.js';
-
-const supportedCodexVersion = '26.820.60940';
-const supportedCodexBuild = '7119';
-const supportedChromiumProduct = 'Chrome/151.0.7922.170';
 
 export interface ConnectDedicatedCodexRendererOptions {
   readonly connect?: (url: string) => Promise<CdpSession>;
@@ -34,10 +34,8 @@ export async function connectDedicatedCodexRenderer(
   request: ConnectDedicatedRendererRequest,
   options: ConnectDedicatedCodexRendererOptions = {},
 ): Promise<DedicatedRendererConnection> {
-  if (
-    request.version !== supportedCodexVersion ||
-    request.build !== supportedCodexBuild
-  ) {
+  const profile = findCodexCompatibilityProfile(request.version, request.build);
+  if (profile === null) {
     throw new Error('Unsupported Codex Desktop version');
   }
   const session = await (options.connect ?? connectCdpSession)(
@@ -46,7 +44,7 @@ export async function connectDedicatedCodexRenderer(
   let lease: CspBypassLease | null = null;
   try {
     const browser = await session.send('Browser.getVersion');
-    if (!isRecord(browser) || browser.product !== supportedChromiumProduct) {
+    if (!isRecord(browser) || browser.product !== profile.chromiumProduct) {
       throw new Error('Unsupported Codex Desktop Chromium version');
     }
     await session.send('Runtime.enable');
@@ -62,14 +60,14 @@ export async function connectDedicatedCodexRenderer(
       request.target.id,
       cspOwnershipScope(request),
     );
-    let installation = await install(session, request, bindingName, 1);
+    let installation = await install(session, request, profile, bindingName, 1);
     for (
       let attempt = 0;
       installation.status === 'not-ready' && attempt < 100;
       attempt++
     ) {
       await (options.wait ?? wait)(100);
-      installation = await install(session, request, bindingName, 1);
+      installation = await install(session, request, profile, bindingName, 1);
     }
     if (installation.status !== 'attached') {
       throw new Error(
@@ -82,6 +80,7 @@ export async function connectDedicatedCodexRenderer(
       session,
       lease,
       request,
+      profile,
       bindingName,
       installation,
     );
@@ -122,6 +121,7 @@ class RemoteDedicatedRendererConnection implements DedicatedRendererConnection {
     private readonly session: CdpSession,
     private cspLease: CspBypassLease | null,
     private readonly request: ConnectDedicatedRendererRequest,
+    private readonly profile: CodexCompatibilityProfile,
     private readonly bindingName: string,
     installation: AttachedInstallation,
   ) {
@@ -221,6 +221,7 @@ class RemoteDedicatedRendererConnection implements DedicatedRendererConnection {
         const installation = await install(
           this.session,
           replacementRequest,
+          this.profile,
           this.bindingName,
           ++this.generation,
         );
@@ -264,6 +265,7 @@ class RemoteDedicatedRendererConnection implements DedicatedRendererConnection {
 async function install(
   session: CdpSession,
   request: ConnectDedicatedRendererRequest,
+  profile: CodexCompatibilityProfile,
   bindingName: string,
   generation: number,
 ): Promise<Installation> {
@@ -271,10 +273,12 @@ async function install(
     bindingName,
     expectedProject: request.expectedProject,
     generation,
+    mainSurfaceSelector: profile.mainSurfaceSelector,
     openSurface: request.openSurface,
     projectPath: request.projectPath,
     surfaceTitle: request.surface.title,
     surfaceUrl: request.surface.url.href,
+    sidebarSelector: profile.sidebarSelector,
   };
   const response = await evaluate(
     session,
@@ -416,10 +420,12 @@ interface BridgeInput {
   readonly bindingName: string;
   readonly expectedProject: DedicatedProjectIdentity | null;
   readonly generation: number;
+  readonly mainSurfaceSelector: string;
   readonly openSurface: boolean;
   readonly projectPath: string;
   readonly surfaceTitle: string;
   readonly surfaceUrl: string;
+  readonly sidebarSelector: string;
 }
 
 // Kept self-contained because CDP serializes this function into the renderer.
@@ -427,10 +433,13 @@ interface BridgeInput {
 function installDomBridge(input: BridgeInput): unknown {
   const root = globalThis as typeof globalThis & { __codexGitBridge?: { close(): void; restore(): void } };
   root.__codexGitBridge?.close();
-  const sidebar = document.querySelector('#app-shell-sidebar');
-  const main = document.querySelector('[data-app-shell-main-surface="default"]');
+  const sidebars = document.querySelectorAll(input.sidebarSelector);
+  const mainSurfaces = document.querySelectorAll(input.mainSurfaceSelector);
+  const sidebar = sidebars.item(0);
+  const main = mainSurfaces.item(0);
   const selectedProject = document.querySelector('[data-app-action-sidebar-project-row][aria-current="page"]');
-  if (!(sidebar instanceof HTMLElement) || !(main instanceof HTMLElement) ||
+  if (sidebars.length !== 1 || mainSurfaces.length !== 1 ||
+      !(sidebar instanceof HTMLElement) || !(main instanceof HTMLElement) ||
       !(selectedProject instanceof HTMLElement)) {
     return { status: 'not-ready' };
   }

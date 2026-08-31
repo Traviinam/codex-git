@@ -40,7 +40,7 @@ export async function collectReleaseEnvironment(
 }
 
 export const SUPPORTED_CODEX_RELEASE_VERSION =
-  '26.820.60940 (build 7119)' as const;
+  '26.818.41509 (build 6962)' as const;
 
 export function validateReleaseEnvironment(
   environment: ReleaseEnvironment,

@@ -94,6 +94,55 @@ describe('CodexCdpHostAdapter', () => {
     expect(nativeSurface?.hidden).toBe(false);
   });
 
+  it('uses the tested left-panel anchor for Codex Desktop build 6962', async () => {
+    const dom = new JSDOM(`
+      <div id="root">
+        <aside class="app-shell-left-panel">
+          <button data-native-entry type="button">Tasks</button>
+        </aside>
+        <main data-app-shell-main-surface="default">Native task</main>
+      </div>
+    `);
+
+    const result = await new CodexCdpHostAdapter({
+      rendererSource: new FixtureRendererSource(
+        fixtureRenderer(dom, '26.818.41509'),
+      ),
+    }).attach({
+      title: 'Codex Git',
+      url: new URL('http://127.0.0.1:4173'),
+    });
+
+    expect(result.kind).toBe('attached');
+    expect(
+      dom.window.document.querySelectorAll('[data-codex-git-sidebar-entry]'),
+    ).toHaveLength(1);
+    if (result.kind === 'attached') await result.connection.close();
+  });
+
+  it('rejects a version and build from different tested profiles', async () => {
+    const dom = new JSDOM(`
+      <div id="root">
+        <aside class="app-shell-left-panel">
+          <button data-native-entry type="button">Tasks</button>
+        </aside>
+        <main data-app-shell-main-surface="default">Native task</main>
+      </div>
+    `);
+
+    const result = await new CodexCdpHostAdapter({
+      rendererSource: new FixtureRendererSource(
+        fixtureRenderer(dom, '26.818.41509', '7119'),
+      ),
+    }).attach({
+      title: 'Codex Git',
+      url: new URL('http://127.0.0.1:4173'),
+    });
+
+    expect(result.kind).toBe('standalone-required');
+    expect(documentEntry(dom)).toBeNull();
+  });
+
   it('keeps exactly one entry when the adapter attaches repeatedly', async () => {
     const dom = compatibleDom();
     const renderer = fixtureRenderer(dom, '26.820.60940');
@@ -492,12 +541,22 @@ function captureNextFrameMessage(
   });
 }
 
-function fixtureRenderer(dom: JSDOM, version: string): CodexRenderer {
-  return new FixtureRenderer(dom, version, {
-    projectPath: null,
-    task: null,
-    theme: 'system',
-  });
+function fixtureRenderer(
+  dom: JSDOM,
+  version: string,
+  build = version === '26.818.41509' ? '6962' : '7119',
+): CodexRenderer {
+  return new FixtureRenderer(
+    dom,
+    version,
+    {
+      projectPath: null,
+      task: null,
+      theme: 'system',
+    },
+    [],
+    build,
+  );
 }
 
 class FixtureRenderer implements CodexRenderer {
@@ -513,6 +572,7 @@ class FixtureRenderer implements CodexRenderer {
     readonly version: string,
     private context: HostContext,
     private readonly leaseEvents: string[] = [],
+    readonly build = '7119',
   ) {
     this.document = dom.window.document;
     this.window = dom.window as unknown as Window & typeof globalThis;

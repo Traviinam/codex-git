@@ -1,8 +1,5 @@
 import type { CodexRenderer } from './renderer.js';
-
-const supportedCodexVersion = '26.820.60940';
-const sidebarSelector = '#app-shell-sidebar';
-const mainSurfaceSelector = '[data-app-shell-main-surface="default"]';
+import { findCodexCompatibilityProfile } from './compatibility-profile.js';
 
 export interface CompatibleCodexAnchors {
   readonly mainSurface: HTMLElement;
@@ -12,18 +9,28 @@ export interface CompatibleCodexAnchors {
 export function findCompatibleCodexAnchors(
   renderer: CodexRenderer,
 ): CompatibleCodexAnchors | null {
+  const profile = findCodexCompatibilityProfile(
+    renderer.version,
+    renderer.build,
+  );
   if (
-    renderer.version !== supportedCodexVersion ||
+    profile === null ||
     renderer.ownership !== 'codex-git-dedicated' ||
     renderer.id.length === 0
   ) {
     return null;
   }
 
-  const sidebar = renderer.document.querySelector(sidebarSelector);
-  const mainSurface = renderer.document.querySelector(mainSurfaceSelector);
+  const sidebars = renderer.document.querySelectorAll(profile.sidebarSelector);
+  const mainSurfaces = renderer.document.querySelectorAll(
+    profile.mainSurfaceSelector,
+  );
+  const sidebar = sidebars.item(0);
+  const mainSurface = mainSurfaces.item(0);
 
-  return sidebar instanceof renderer.window.HTMLElement &&
+  return sidebars.length === 1 &&
+    mainSurfaces.length === 1 &&
+    sidebar instanceof renderer.window.HTMLElement &&
     mainSurface instanceof renderer.window.HTMLElement
     ? { mainSurface, sidebar }
     : null;

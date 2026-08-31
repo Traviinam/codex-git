@@ -5,6 +5,7 @@ export interface CspBypassLease {
 }
 
 export interface CodexRenderer {
+  readonly build: string;
   readonly document: Document;
   readonly id: string;
   readonly ownership: 'codex-git-dedicated';

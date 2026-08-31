@@ -33,11 +33,12 @@ endpoint, or record it in ordinary logs.
 
 ## Tested profile
 
-| Codex Desktop                 | Chromium framework | Required anchors                                                | Evidence                                                                 |
-| ----------------------------- | ------------------ | --------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `26.820.60940` (build `7119`) | `151.0.7922.170`   | `#app-shell-sidebar`; `[data-app-shell-main-surface="default"]` | Installed renderer bundle inspection plus automated DOM fixture coverage |
+| Codex Desktop                 | Chromium framework | Required anchors                                                   | Evidence                                                                                                                                                       |
+| ----------------------------- | ------------------ | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `26.820.60940` (build `7119`) | `151.0.7922.170`   | `#app-shell-sidebar`; `[data-app-shell-main-surface="default"]`    | Installed renderer bundle inspection plus automated DOM fixture coverage                                                                                       |
+| `26.818.41509` (build `6962`) | `151.0.7922.170`   | `.app-shell-left-panel`; `[data-app-shell-main-surface="default"]` | App bundle SHA-256 `8eb91bd9efbf9a4dd04b9b0afdbfcb4e0bab5da18c1919ad74ca327c00c7e791`; live isolated CDP attachment/teardown; automated exact-profile fixtures |
 
-The automated fixture covers read-only probing, fail-closed fallback,
+The automated exact-profile matrix covers read-only probing, fail-closed fallback,
 transactional attachment, one-entry mounting, native navigation, repeat
 attachment, context updates, opaque iframe sandboxing,
 generation/capability/challenge rejection, CSP lease restoration, and complete
@@ -51,16 +52,20 @@ matrix; do not widen selectors to make an unknown build appear compatible.
 
 This matrix passed on 2026-08-29 against a disposable dedicated profile using
 Codex Desktop `26.820.60940` (build `7119`) and Chromium `151.0.7922.170`.
+The current release profile, Codex Desktop `26.818.41509` (build `6962`), has
+passed isolated runtime attachment and teardown but still requires the human
+host, keyboard, and VoiceOver record produced by
+`scripts/voiceover-release-wizard.sh` before the release gate can pass.
+
+The human portion of the matrix is intentionally limited to behavior that
+requires an actual Codex/macOS session. The release wizard records these checks:
 
 - Open `Git` and confirm exactly one entry and one full-page frame.
 - Select a native destination and confirm native content is restored with no
-  hidden overlay.
-- Open `Git` again after a renderer reload and confirm one new frame generation.
-- Change theme/task and confirm typed context updates; change Current Project
-  and confirm a typed standalone-required transition.
-- Send missing, altered, replayed, and stale capability/challenge messages and
-  confirm they cause no action.
-- Close the connection and confirm all nodes, listeners, CDP sessions, and the
-  CSP bypass lease are gone.
-- Break either required selector and confirm the native UI remains byte-for-byte
-  unchanged while the standalone fallback is reported.
+  hidden overlay, then reopen `Git` without duplication.
+- Reload the renderer and confirm exactly one remounted entry and one fresh
+  frame generation.
+
+Context and Current Project transitions, invalid/replayed messages, full
+connection and CSP teardown, and broken-selector fallback are enforced by the
+automated exact-profile matrix rather than claimed by the human record.

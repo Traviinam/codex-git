@@ -95,6 +95,7 @@ export async function createReleaseReport(
                 check,
                 sourceRevision,
                 generatedAt,
+                environment.codex,
               ))
                 ? 'passed'
                 : 'failed',

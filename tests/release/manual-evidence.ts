@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 const executeFile = promisify(execFile);
 
 export interface ManualEvidenceCheck {
+  readonly codexVersion: string | null;
   readonly environment: string | null;
   readonly id: string;
   readonly performedAt: string | null;
@@ -44,6 +45,7 @@ export function parseManualEvidence(value: unknown): ManualEvidenceRecord {
     ) {
       throw new Error(`Manual evidence check ${index} is invalid.`);
     }
+    const codexVersion = optionalString(check.codexVersion);
     const environment = optionalString(check.environment);
     const performedAt = optionalString(check.performedAt);
     const record = optionalString(check.record);
@@ -55,17 +57,19 @@ export function parseManualEvidence(value: unknown): ManualEvidenceRecord {
     ids.add(check.id);
     if (
       check.status === 'passed' &&
-      (environment === null ||
+      (codexVersion === null ||
+        environment === null ||
         performedAt === null ||
         record === null ||
         sourceRevision === null ||
         validUntil === null)
     ) {
       throw new Error(
-        `Passed manual evidence ${check.id} requires environment, performedAt, record, sourceRevision, and validUntil.`,
+        `Passed manual evidence ${check.id} requires codexVersion, environment, performedAt, record, sourceRevision, and validUntil.`,
       );
     }
     return {
+      codexVersion,
       environment,
       id: check.id,
       performedAt,
@@ -111,10 +115,12 @@ export async function manualEvidenceCheckPasses(
   check: ManualEvidenceCheck | undefined,
   sourceRevision: string,
   generatedAt: Date,
+  codexVersion: string,
 ): Promise<boolean> {
   if (
     check?.status !== 'passed' ||
     check.sourceRevision !== sourceRevision ||
+    check.codexVersion !== codexVersion ||
     check.performedAt === null ||
     check.validUntil === null ||
     check.record === null

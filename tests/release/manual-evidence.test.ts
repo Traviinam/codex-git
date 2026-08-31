@@ -8,7 +8,8 @@ describe('manual release evidence', () => {
       parseManualEvidence({
         checks: [
           {
-            environment: 'Codex Desktop 26.820.60940 (build 7119)',
+            codexVersion: '26.818.41509 (build 6962)',
+            environment: 'Codex Desktop 26.818.41509 (build 6962)',
             id: 'codex-host-smoke',
             performedAt: '2026-08-29T00:00:00.000Z',
             record:
@@ -18,6 +19,7 @@ describe('manual release evidence', () => {
             validUntil: '2026-09-29T00:00:00.000Z',
           },
           {
+            codexVersion: null,
             environment: null,
             id: 'voiceover-keyboard-smoke',
             performedAt: null,
@@ -37,6 +39,7 @@ describe('manual release evidence', () => {
       parseManualEvidence({
         checks: [
           {
+            codexVersion: null,
             environment: null,
             id: 'voiceover-keyboard-smoke',
             performedAt: null,
@@ -48,7 +51,9 @@ describe('manual release evidence', () => {
         ],
         schemaVersion: 1,
       }),
-    ).toThrow('requires environment, performedAt, record, sourceRevision');
+    ).toThrow(
+      'requires codexVersion, environment, performedAt, record, sourceRevision',
+    );
   });
 
   it('rejects duplicate check IDs', () => {
@@ -56,6 +61,7 @@ describe('manual release evidence', () => {
       parseManualEvidence({
         checks: [
           {
+            codexVersion: null,
             environment: null,
             id: 'voiceover-keyboard-smoke',
             performedAt: null,
@@ -65,6 +71,7 @@ describe('manual release evidence', () => {
             validUntil: null,
           },
           {
+            codexVersion: null,
             environment: null,
             id: 'voiceover-keyboard-smoke',
             performedAt: null,

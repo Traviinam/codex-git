@@ -57,11 +57,11 @@ and ends only after SSE-triggered refresh makes the new Changed File visible in
 the DOM.
 
 The approved CI reference profile is `github-actions-macos-15`, paired with the
-tested Codex compatibility profile `26.820.60940 (build 7119)`. The JSON and
+tested Codex compatibility profile `26.818.41509 (build 6962)`. The JSON and
 Markdown artifacts record the actual CPU, architecture, memory, macOS, Git,
 Node.js, reference profile, and Codex compatibility version. A local release
 run must explicitly set `CODEX_GIT_REFERENCE_PROFILE=local-macos-release` and
-`CODEX_DESKTOP_VERSION='26.820.60940 (build 7119)'`; an unapproved platform,
+`CODEX_DESKTOP_VERSION='26.818.41509 (build 6962)'`; an unapproved platform,
 profile, or missing/mismatched Codex version fails AC-24.
 
 ## VoiceOver and keyboard smoke record
@@ -84,8 +84,9 @@ record beside the generated matrix:
   state remains understandable without color.
 
 The completed record must include its execution time, expiry, environment,
-current product-source revision, and the exact checklist path. The gate copies a
-redacted version into `artifacts/release-gate/manual/`.
+current product-source revision, and the exact checklist path. Commit the
+durable source record under `docs/release/evidence/`; the gate copies a redacted
+version into `artifacts/release-gate/manual/`.
 
 Codex host attachment and native UI restoration use the separately maintained
 [exact-build smoke matrix](../host-integration/codex-compatibility.md#manual-smoke-matrix).
