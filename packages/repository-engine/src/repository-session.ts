@@ -1,3 +1,13 @@
+import { randomUUID } from 'node:crypto';
+import {
+  access,
+  open,
+  readFile,
+  realpath,
+  rename,
+  stat,
+  unlink,
+} from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 
 import {
@@ -6,6 +16,8 @@ import {
   type BranchSearchRequest,
   type BranchSearchResult,
   type CommandEnvelope,
+  type CommitDraft,
+  type CommitDraftUpdate,
   type DiffResult,
   type FileId,
   type NativeTargetId,
@@ -16,6 +28,7 @@ import {
   type RefId,
   type RemoteId,
   type RepositoryId,
+  type WorktreeId,
 } from '@codex-git/protocol';
 
 import { InvalidationStream } from './invalidation-stream.js';
@@ -47,6 +60,7 @@ export interface RepositorySession extends RepositoryPublicationSession {
     targetId: NativeTargetId,
   ): Promise<WorktreeNativeTarget>;
   searchBranches(request: BranchSearchRequest): Promise<BranchSearchResult>;
+  updateDraft(request: CommitDraftUpdate): Promise<CommitDraft>;
   dispatch(request: CommandEnvelope): Promise<OperationReceipt>;
   cancelOperation(operationId: OperationId): Promise<OperationResult>;
   recoverOperation(operationId: OperationId): Promise<OperationResult>;
@@ -82,6 +96,14 @@ export interface RepositorySessionOptions {
     worktree: RepositorySnapshot['worktrees'][number],
     fileId: FileId,
   ) => Promise<DiffResult>;
+  readonly operationTimeoutMilliseconds?: number;
+  readonly inspectCommitTarget?: (
+    worktreePath: AbsolutePath,
+    signal: AbortSignal,
+  ) => Promise<CommitTargetInspection>;
+  readonly beginCommitIndexTransaction?: (
+    indexPath: string,
+  ) => Promise<CommitIndexTransaction>;
 }
 
 type FetchEffect =
@@ -147,7 +169,30 @@ type GitProcessRunner = (
   signal?: AbortSignal,
   maximumOutputBytes?: number,
   input?: Uint8Array,
+  environment?: Readonly<Record<string, string>>,
 ) => Promise<Uint8Array>;
+
+export interface CommitTargetInspection {
+  readonly commonGitDirectory: string;
+  readonly worktreePath: string;
+  readonly headObjectId: string | null;
+  readonly indexTree: string;
+  readonly indexPath: string;
+  readonly indexLocked: boolean;
+}
+
+export interface CommitIndexTransaction {
+  readonly environment: Readonly<Record<string, string>>;
+  promote(): Promise<void>;
+  cleanupKnownFailure(): Promise<void>;
+}
+
+class CommitIndexLockExists extends Error {
+  constructor() {
+    super('The Worktree Index lock already exists.');
+    this.name = 'CommitIndexLockExists';
+  }
+}
 
 interface BranchBinding {
   readonly fullName: string;
@@ -224,6 +269,10 @@ export function createRepositorySession(
   let postOperationRefresh: Promise<void> | undefined;
   let latestSuccessfulFetchAt: string | null = null;
   const remoteFetches = new Map<RemoteId, string>();
+  const commitDrafts = new Map<
+    WorktreeId,
+    { readonly revision: number; readonly text: string }
+  >();
   let fetch = latest?.fetch ?? ({ kind: 'never' } as const);
 
   const publishCurrent = (base: RepositorySnapshot): RepositorySnapshot => {
@@ -275,7 +324,8 @@ export function createRepositorySession(
   };
 
   const operations = createOperationSession({
-    operationTimeoutMilliseconds: OPERATION_TIMEOUT_MILLISECONDS,
+    operationTimeoutMilliseconds:
+      options.operationTimeoutMilliseconds ?? OPERATION_TIMEOUT_MILLISECONDS,
     publish(summary) {
       invalidations.publish({ kind: 'operation', operation: summary });
       operationSummaries.set(summary.operationId, summary);
@@ -962,6 +1012,34 @@ export function createRepositorySession(
     requestScopedRefresh: (scope: RepositoryRefreshScope) =>
       observe(() => delegate.requestScopedRefresh(scope)),
     subscribe: () => invalidations.subscribe(),
+    async updateDraft(request) {
+      const worktree = latestBase?.worktrees.find(
+        ({ worktreeId }) => worktreeId === request.worktreeId,
+      );
+      if (worktree === undefined) {
+        throw new RepositoryTargetFailure();
+      }
+      const current = commitDrafts.get(request.worktreeId) ?? {
+        revision: 0,
+        text: '',
+      };
+      if ('kind' in request) {
+        return {
+          worktreeId: request.worktreeId,
+          revision: current.revision,
+          text: current.text,
+        };
+      }
+      if (request.expectedRevision !== current.revision) {
+        throw new RepositoryTargetFailure();
+      }
+      const next = {
+        revision: current.revision + 1,
+        text: request.update.kind === 'set' ? request.update.text : '',
+      };
+      commitDrafts.set(request.worktreeId, next);
+      return { worktreeId: request.worktreeId, ...next };
+    },
     async fetch(request) {
       const remoteIds =
         request.remoteId === null
@@ -1381,6 +1459,15 @@ export function createRepositorySession(
       };
     },
     async dispatch(request) {
+      if (request.command.kind === 'cancel_operation') {
+        await operations.cancel(request.command.operationId);
+        await observe(() => delegate.requestRefresh()).catch(() => undefined);
+        return {
+          operationId: request.command.operationId,
+          clientCommandId: request.clientCommandId,
+          disposition: 'accepted',
+        };
+      }
       if (
         request.command.kind === 'pull' ||
         request.command.kind === 'push' ||
@@ -1769,6 +1856,378 @@ export function createRepositorySession(
           disposition: 'accepted',
         };
       }
+      if (request.command.kind === 'commit') {
+        const command = request.command;
+        const initial = latestBase?.worktrees.find(
+          ({ worktreeId }) => worktreeId === command.worktreeId,
+        );
+        if (initial === undefined) {
+          throw new Error('Commit requires a current Worktree snapshot.');
+        }
+        const initialRepositoryId = latestBase?.repositoryId;
+        const initialCommonGitDirectory = latestBase?.commonGitDirectory;
+        const initialGeneration = initial.generation;
+        const initialCanonicalPath = initial.canonicalPath;
+        const initialHead = initial.head;
+        const initialIndexFingerprint = initial.index?.fingerprint ?? null;
+        const attachedRef =
+          initialHead.kind === 'local_branch' ? initialHead.fullName : null;
+        let commitIntent:
+          | {
+              readonly summary: string;
+              successfulObjectId: string | null;
+              successfulParentObjectIds: readonly string[] | null;
+            }
+          | undefined;
+        const admission = await operations.dispatch({
+          kind: 'commit',
+          worktreeGeneration: initialGeneration,
+          attachedRef,
+          async reconcileBusy() {
+            await observe(() => delegate.requestRefresh()).catch(
+              () => undefined,
+            );
+          },
+          async execute({ signal }) {
+            const current = await observe(() =>
+              delegate.requestRefresh(),
+            ).catch(() => undefined);
+            const worktree =
+              current?.kind === 'repository'
+                ? current.repository.worktrees.find(
+                    ({ worktreeId }) => worktreeId === command.worktreeId,
+                  )
+                : undefined;
+            const draft = commitDrafts.get(command.worktreeId) ?? {
+              revision: 0,
+              text: '',
+            };
+            if (
+              current?.kind === 'repository' &&
+              worktree !== undefined &&
+              (worktree.index?.locked === true ||
+                worktree.gitLock.kind !== 'unlocked')
+            ) {
+              return reject(
+                'index_locked',
+                'The Worktree Index is locked by another Git process.',
+              );
+            }
+            if (
+              current?.kind !== 'repository' ||
+              current.repository.repositoryId !== initialRepositoryId ||
+              current.repository.commonGitDirectory !==
+                initialCommonGitDirectory ||
+              worktree === undefined ||
+              worktree.generation !== initialGeneration ||
+              worktree.canonicalPath !== initialCanonicalPath ||
+              worktree.worktreeRevision !== command.expectedWorktreeRevision ||
+              !sameHead(worktree.head, initialHead) ||
+              worktree.index?.fingerprint !== initialIndexFingerprint ||
+              draft.revision !== command.draftRevision
+            ) {
+              return reject(
+                'stale',
+                'Worktree, HEAD, Index, or Commit Draft changed; refresh and try again.',
+              );
+            }
+            if (draft.text.trim().length === 0) {
+              return reject(
+                'precondition_failed',
+                'Commit requires a non-empty Commit Draft.',
+              );
+            }
+            if (
+              worktree.head.kind === 'detached' &&
+              !command.confirmDetachedHead
+            ) {
+              return reject(
+                'precondition_failed',
+                'Detached HEAD Commit requires explicit confirmation.',
+              );
+            }
+            if (
+              worktree.availability.kind !== 'available' ||
+              worktree.canonicalPath === null ||
+              worktree.freshness.kind !== 'fresh' ||
+              worktree.status === null ||
+              worktree.status.conflicted !== 0 ||
+              worktree.status.inProgressOperation !== undefined ||
+              worktree.status.staged === 0 ||
+              worktree.index === null
+            ) {
+              return reject(
+                'precondition_failed',
+                'Commit requires staged content in an available Worktree with no Conflict or Git operation.',
+              );
+            }
+            if (worktree.index.locked || worktree.gitLock.kind !== 'unlocked') {
+              return reject(
+                'index_locked',
+                'The Worktree Index is locked by another Git process.',
+              );
+            }
+            if (options.runGit === undefined) {
+              return reject(
+                'unsupported_state',
+                'Commit is unavailable in this Repository Session.',
+              );
+            }
+            try {
+              await Promise.all([
+                options.runGit(
+                  ['-C', worktree.canonicalPath, 'var', 'GIT_AUTHOR_IDENT'],
+                  false,
+                  undefined,
+                  signal,
+                ),
+                options.runGit(
+                  ['-C', worktree.canonicalPath, 'var', 'GIT_COMMITTER_IDENT'],
+                  false,
+                  undefined,
+                  signal,
+                ),
+              ]);
+            } catch (error) {
+              if (signal.aborted) throw error;
+              return reject(
+                'missing_identity',
+                'Git author and committer identity must be configured before Commit.',
+              );
+            }
+            const expectedIndexTree = decodeGitLine(
+              await options.runGit(
+                ['-C', worktree.canonicalPath, 'write-tree'],
+                false,
+                undefined,
+                signal,
+              ),
+            );
+            commitIntent = {
+              summary: firstCommitLine(draft.text),
+              successfulObjectId: null,
+              successfulParentObjectIds: null,
+            };
+            const finalInspection = await (
+              options.inspectCommitTarget ??
+              ((worktreePath, inspectionSignal) =>
+                inspectCommitTarget(
+                  worktreePath,
+                  options.runGit!,
+                  inspectionSignal,
+                ))
+            )(worktree.canonicalPath, signal);
+            if (finalInspection.indexLocked) {
+              return reject(
+                'index_locked',
+                'The Worktree Index is locked by another Git process.',
+              );
+            }
+            if (
+              finalInspection.commonGitDirectory !==
+                initialCommonGitDirectory ||
+              finalInspection.worktreePath !== initialCanonicalPath ||
+              finalInspection.headObjectId !== worktree.head.objectId ||
+              finalInspection.indexTree !== expectedIndexTree
+            ) {
+              return reject(
+                'stale',
+                'Worktree identity, HEAD, or Index changed immediately before Commit.',
+              );
+            }
+            let indexTransaction: CommitIndexTransaction;
+            try {
+              indexTransaction = await (
+                options.beginCommitIndexTransaction ??
+                beginCommitIndexTransaction
+              )(finalInspection.indexPath);
+            } catch (error) {
+              if (error instanceof CommitIndexLockExists) {
+                return reject(
+                  'index_locked',
+                  'The Worktree Index is locked by another Git process.',
+                );
+              }
+              throw error;
+            }
+            const transactionIndexTree = decodeGitLine(
+              await options.runGit(
+                ['-C', worktree.canonicalPath, 'write-tree'],
+                false,
+                undefined,
+                signal,
+                undefined,
+                undefined,
+                indexTransaction.environment,
+              ),
+            );
+            const transactionHeadObjectId = decodeGitLine(
+              await options.runGit(
+                [
+                  '-C',
+                  worktree.canonicalPath,
+                  'rev-parse',
+                  '--verify',
+                  '-q',
+                  'HEAD',
+                ],
+                false,
+                1,
+                signal,
+              ),
+            );
+            if (
+              transactionIndexTree !== expectedIndexTree ||
+              (transactionHeadObjectId.length === 0
+                ? null
+                : transactionHeadObjectId) !== worktree.head.objectId
+            ) {
+              await indexTransaction.cleanupKnownFailure();
+              return reject(
+                'stale',
+                'HEAD or Index changed while acquiring the Commit transaction.',
+              );
+            }
+            let commitOutput: Uint8Array;
+            try {
+              commitOutput = await options.runGit(
+                ['-C', worktree.canonicalPath, 'commit', '--file=-'],
+                true,
+                undefined,
+                signal,
+                undefined,
+                new TextEncoder().encode(draft.text),
+                indexTransaction.environment,
+              );
+            } catch (error) {
+              if (signal.aborted) throw error;
+              if (!isKnownGitFailure(error)) throw error;
+              await indexTransaction.cleanupKnownFailure();
+              return {
+                kind: 'failed_known' as const,
+                code: classifyCommitFailure(error),
+              };
+            }
+            await indexTransaction.promote();
+            const committedObjectAbbreviation =
+              readCommitObjectAbbreviation(commitOutput);
+            if (committedObjectAbbreviation === null) {
+              throw new Error(
+                'Git returned success without an attributable Commit identity.',
+              );
+            }
+            const identity = decodeCommitIdentity(
+              await options.runGit(
+                [
+                  '-C',
+                  worktree.canonicalPath,
+                  'rev-list',
+                  '--parents',
+                  '-n',
+                  '1',
+                  `${committedObjectAbbreviation}^{commit}`,
+                ],
+                false,
+                undefined,
+                AbortSignal.timeout(10_000),
+              ),
+            );
+            commitIntent.successfulObjectId = identity.objectId;
+            commitIntent.successfulParentObjectIds = identity.parentObjectIds;
+            return {
+              kind: 'attempted' as const,
+              successfulObjectId: commitIntent.successfulObjectId,
+              successfulParentObjectIds: commitIntent.successfulParentObjectIds,
+            };
+          },
+          async reconcile(context) {
+            const evidence =
+              context.execution.kind === 'returned'
+                ? context.execution.evidence
+                : undefined;
+            const reconciled = await observe(() =>
+              delegate.requestRefresh(),
+            ).catch(() => undefined);
+            if (
+              reconciled?.kind !== 'repository' ||
+              reconciled.repository.refresh.kind !== 'fresh'
+            ) {
+              return unknownCommit();
+            }
+            if (evidence?.kind === 'rejected') return evidence.result;
+            const worktree = reconciled.repository.worktrees.find(
+              ({ worktreeId }) => worktreeId === command.worktreeId,
+            );
+            if (
+              reconciled.repository.repositoryId !== initialRepositoryId ||
+              reconciled.repository.commonGitDirectory !==
+                initialCommonGitDirectory ||
+              worktree === undefined ||
+              worktree.generation !== initialGeneration ||
+              worktree.canonicalPath !== initialCanonicalPath ||
+              worktree.freshness.kind !== 'fresh'
+            ) {
+              return unknownCommit();
+            }
+            const previousObjectId = initialHead.objectId;
+            const currentObjectId = worktree.head.objectId;
+            if (evidence?.kind === 'failed_known') {
+              return {
+                kind: 'failed_known',
+                code: evidence.code,
+                message: commitFailureMessage(evidence.code),
+              };
+            }
+            const successfulObjectId =
+              evidence?.kind === 'attempted'
+                ? evidence.successfulObjectId
+                : commitIntent?.successfulObjectId;
+            const successfulParentObjectIds =
+              evidence?.kind === 'attempted'
+                ? evidence.successfulParentObjectIds
+                : commitIntent?.successfulParentObjectIds;
+            if (
+              successfulObjectId !== null &&
+              successfulObjectId !== undefined &&
+              successfulParentObjectIds !== null &&
+              successfulParentObjectIds !== undefined &&
+              commitIntent !== undefined &&
+              currentObjectId === successfulObjectId &&
+              currentObjectId !== previousObjectId &&
+              commitParentsMatch(successfulParentObjectIds, previousObjectId) &&
+              headAttachmentMatches(worktree.head, initialHead)
+            ) {
+              const currentDraft = commitDrafts.get(command.worktreeId);
+              if (currentDraft?.revision === command.draftRevision) {
+                commitDrafts.set(command.worktreeId, {
+                  revision: currentDraft.revision + 1,
+                  text: '',
+                });
+              }
+              return {
+                kind: 'succeeded',
+                result: {
+                  kind: 'commit',
+                  shortObjectId: currentObjectId.slice(0, 7),
+                  summary: commitIntent.summary,
+                },
+              };
+            }
+            return unknownCommit();
+          },
+        });
+        if (admission.kind === 'closed') {
+          throw new Error('The Repository Session is closed.');
+        }
+        return {
+          operationId:
+            admission.kind === 'accepted'
+              ? admission.operation.operationId
+              : admission.result.operationId,
+          clientCommandId: request.clientCommandId,
+          disposition: 'accepted',
+        };
+      }
       if (request.command.kind !== 'switch_branch') {
         throw new Error(
           'This Repository Session does not support that command.',
@@ -2068,6 +2527,267 @@ function isKnownGitFailure(error: unknown): boolean {
     'exitCode' in error &&
     typeof error.exitCode === 'number'
   );
+}
+
+function classifyCommitFailure(error: unknown): OperationFailureCode {
+  if (error instanceof Error && 'gitFailureCode' in error) {
+    if (error.gitFailureCode === 'hook_rejected') return 'hook_rejected';
+    if (error.gitFailureCode === 'signing_failed') return 'signing_failed';
+  }
+  return 'process_failed';
+}
+
+function commitFailureMessage(code: OperationFailureCode): string {
+  if (code === 'hook_rejected') {
+    return 'A configured Git hook rejected the Commit.';
+  }
+  if (code === 'signing_failed') {
+    return 'Git could not sign the Commit with the configured signing setup.';
+  }
+  return 'Git could not create the Commit.';
+}
+
+function unknownCommit() {
+  return {
+    kind: 'unknown_outcome' as const,
+    code: 'reconciliation_incomplete' as const,
+    message: 'The Commit outcome could not be reconciled to fresh Git state.',
+    recoveryAvailable: true as const,
+  };
+}
+
+function sameHead(
+  left: RepositorySnapshot['worktrees'][number]['head'],
+  right: RepositorySnapshot['worktrees'][number]['head'],
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function decodeGitLine(output: Uint8Array): string {
+  return new TextDecoder('utf-8', { fatal: true })
+    .decode(output)
+    .replace(/\r?\n$/u, '');
+}
+
+function firstCommitLine(message: string): string {
+  return message.split(/\r?\n/u, 1)[0]?.trim().slice(0, 512) || 'Commit';
+}
+
+function readCommitObjectAbbreviation(output: Uint8Array): string | null {
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(output);
+  const matches = [...text.matchAll(/^\[.+ ([0-9a-f]{4,64})\](?: |$)/gmu)];
+  return matches.at(-1)?.[1] ?? null;
+}
+
+function decodeCommitIdentity(output: Uint8Array): {
+  readonly objectId: string;
+  readonly parentObjectIds: readonly string[];
+} {
+  const fields = decodeGitLine(output).split(' ');
+  const objectId = fields[0];
+  if (
+    objectId === undefined ||
+    !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(objectId) ||
+    fields
+      .slice(1)
+      .some((field) => !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(field))
+  ) {
+    throw new Error('Git returned an invalid Commit identity.');
+  }
+  return { objectId, parentObjectIds: fields.slice(1) };
+}
+
+async function inspectCommitTarget(
+  worktreePath: AbsolutePath,
+  runGit: GitProcessRunner,
+  signal: AbortSignal,
+): Promise<CommitTargetInspection> {
+  const commonGitDirectory = await realpath(
+    decodeGitLine(
+      await runGit(
+        [
+          '-C',
+          worktreePath,
+          'rev-parse',
+          '--path-format=absolute',
+          '--git-common-dir',
+        ],
+        false,
+        undefined,
+        signal,
+      ),
+    ),
+  );
+  const resolvedWorktreePath = await realpath(
+    decodeGitLine(
+      await runGit(
+        [
+          '-C',
+          worktreePath,
+          'rev-parse',
+          '--path-format=absolute',
+          '--show-toplevel',
+        ],
+        false,
+        undefined,
+        signal,
+      ),
+    ),
+  );
+  const headObjectId = decodeGitLine(
+    await runGit(
+      ['-C', worktreePath, 'rev-parse', '--verify', '-q', 'HEAD'],
+      false,
+      1,
+      signal,
+    ),
+  );
+  const indexTree = decodeGitLine(
+    await runGit(['-C', worktreePath, 'write-tree'], false, undefined, signal),
+  );
+  const indexPath = decodeGitLine(
+    await runGit(
+      [
+        '-C',
+        worktreePath,
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-path',
+        'index',
+      ],
+      false,
+      undefined,
+      signal,
+    ),
+  );
+  return {
+    commonGitDirectory,
+    worktreePath: resolvedWorktreePath,
+    headObjectId: headObjectId.length === 0 ? null : headObjectId,
+    indexTree,
+    indexPath,
+    indexLocked: await pathIsAccessible(`${indexPath}.lock`),
+  };
+}
+
+async function beginCommitIndexTransaction(
+  indexPath: string,
+): Promise<CommitIndexTransaction> {
+  const sentinelPath = `${indexPath}.lock`;
+  const privateIndexPath = `${indexPath}.codex-commit-${randomUUID()}`;
+  let sentinel;
+  try {
+    sentinel = await open(sentinelPath, 'wx', 0o600);
+  } catch (error) {
+    if (isFileExistsError(error)) throw new CommitIndexLockExists();
+    throw error;
+  }
+  let sentinelIdentity: string;
+  try {
+    sentinelIdentity = fileIdentity(await sentinel.stat());
+  } catch (error) {
+    await sentinel.close().catch(() => undefined);
+    throw error;
+  }
+  await sentinel.close();
+  let privateIndex;
+  try {
+    privateIndex = await open(privateIndexPath, 'wx', 0o600);
+    const contents = await readFile(indexPath);
+    const metadata = await open(indexPath, 'r');
+    try {
+      const { mode } = await metadata.stat();
+      await privateIndex.chmod(mode & 0o777);
+    } finally {
+      await metadata.close();
+    }
+    await privateIndex.writeFile(contents);
+    await privateIndex.sync();
+  } catch (error) {
+    await privateIndex?.close().catch(() => undefined);
+    await unlink(privateIndexPath).catch(() => undefined);
+    const current = await stat(sentinelPath).catch(() => undefined);
+    if (current !== undefined && fileIdentity(current) === sentinelIdentity) {
+      await unlink(sentinelPath).catch(() => undefined);
+    }
+    throw error;
+  }
+  await privateIndex.close();
+  let privateOwned = true;
+  let sentinelOwned = true;
+  const removeOwnedSentinel = async () => {
+    if (!sentinelOwned) return;
+    const current = await stat(sentinelPath).catch(() => undefined);
+    if (current === undefined || fileIdentity(current) !== sentinelIdentity) {
+      return;
+    }
+    await unlink(sentinelPath);
+    sentinelOwned = false;
+  };
+  return {
+    environment: { GIT_INDEX_FILE: privateIndexPath },
+    async promote() {
+      if (!privateOwned) {
+        throw new Error('The Commit Index transaction is closed.');
+      }
+      await rename(privateIndexPath, indexPath);
+      privateOwned = false;
+      await removeOwnedSentinel();
+    },
+    async cleanupKnownFailure() {
+      if (privateOwned) {
+        await unlink(privateIndexPath).catch(() => undefined);
+        await unlink(`${privateIndexPath}.lock`).catch(() => undefined);
+        privateOwned = false;
+      }
+      await removeOwnedSentinel();
+    },
+  };
+}
+
+function fileIdentity(value: {
+  readonly birthtimeMs: number;
+  readonly dev: number;
+  readonly ino: number;
+}): string {
+  return `${value.dev}:${value.ino}:${value.birthtimeMs}`;
+}
+
+function isFileExistsError(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    (error as NodeJS.ErrnoException).code === 'EEXIST'
+  );
+}
+
+async function pathIsAccessible(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function headAttachmentMatches(
+  current: RepositorySnapshot['worktrees'][number]['head'],
+  initial: RepositorySnapshot['worktrees'][number]['head'],
+): boolean {
+  if (current.kind !== initial.kind) return false;
+  return (
+    current.kind !== 'local_branch' ||
+    (initial.kind === 'local_branch' && current.fullName === initial.fullName)
+  );
+}
+
+function commitParentsMatch(
+  actual: readonly string[],
+  expectedParentObjectId: string | null,
+): boolean {
+  return expectedParentObjectId === null
+    ? actual.length === 0
+    : actual.length === 1 && actual[0] === expectedParentObjectId;
 }
 
 function unknownFileMutation() {

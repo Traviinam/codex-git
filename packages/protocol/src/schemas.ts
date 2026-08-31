@@ -84,17 +84,23 @@ export const branchSearchResultSchema = z.strictObject({
     .readonly(),
 });
 
-export const commitDraftUpdateSchema = z.strictObject({
-  worktreeId: worktreeIdSchema,
-  expectedRevision: revisionSchema,
-  update: z.discriminatedUnion('kind', [
-    z.strictObject({ kind: z.literal('clear') }),
-    z.strictObject({
-      kind: z.literal('set'),
-      text: utf8StringAtMost(PROTOCOL_LIMITS.draftBytes),
-    }),
-  ]),
-});
+export const commitDraftUpdateSchema = z.union([
+  z.strictObject({
+    kind: z.literal('get'),
+    worktreeId: worktreeIdSchema,
+  }),
+  z.strictObject({
+    worktreeId: worktreeIdSchema,
+    expectedRevision: revisionSchema,
+    update: z.discriminatedUnion('kind', [
+      z.strictObject({ kind: z.literal('clear') }),
+      z.strictObject({
+        kind: z.literal('set'),
+        text: utf8StringAtMost(PROTOCOL_LIMITS.draftBytes),
+      }),
+    ]),
+  }),
+]);
 
 export const commitDraftSchema = z.strictObject({
   worktreeId: worktreeIdSchema,

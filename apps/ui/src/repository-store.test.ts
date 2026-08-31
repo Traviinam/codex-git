@@ -6,6 +6,51 @@ import type { RepositoryOverviewSource } from './repository-overview-model.js';
 import { createRepositoryStore } from './repository-store.js';
 
 describe('RepositoryStore lifecycle', () => {
+  it('waits for the backend draft revision before persisting text typed during initial load', async () => {
+    const fixture = createOverviewFixture('changed-worktree');
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository') throw new Error('Expected Repository');
+    const worktree = current.snapshot.worktrees[0]!;
+    let resolveDraft!: (draft: {
+      worktreeId: typeof worktree.worktreeId;
+      revision: number;
+      text: string;
+    }) => void;
+    const updateCommitDraft = vi.fn(
+      async (
+        request: Parameters<RepositoryOverviewSource['updateCommitDraft']>[0],
+      ) => ({
+        worktreeId: request.worktreeId,
+        revision: request.expectedRevision + 1,
+        text: request.update.kind === 'set' ? request.update.text : '',
+      }),
+    );
+    const source: RepositoryOverviewSource = {
+      ...fixture.source,
+      getCommitDraft: () => new Promise((resolve) => (resolveDraft = resolve)),
+      updateCommitDraft,
+    };
+    const store = createRepositoryStore(source);
+
+    store.setCommitDraft(worktree.worktreeId, 'Locally typed draft');
+    expect(updateCommitDraft).not.toHaveBeenCalled();
+    resolveDraft({
+      worktreeId: worktree.worktreeId,
+      revision: 4,
+      text: 'Older backend draft',
+    });
+
+    await vi.waitFor(() => expect(updateCommitDraft).toHaveBeenCalled());
+    expect(updateCommitDraft).toHaveBeenCalledWith({
+      worktreeId: worktree.worktreeId,
+      expectedRevision: 4,
+      update: { kind: 'set', text: 'Locally typed draft' },
+    });
+    expect(store.getSnapshot().commitDrafts[worktree.worktreeId]).toBe(
+      'Locally typed draft',
+    );
+  });
+
   it('submits Push with the selected Worktree and observed revisions', async () => {
     const fixture = createOverviewFixture('one-worktree');
     const requestRemoteOperation = vi.fn(async () => ({
@@ -166,4 +211,303 @@ describe('RepositoryStore lifecycle', () => {
 
     expect(store.getSnapshot().selectedFileId).toBe(stagedFileId);
   });
+
+  it('preserves a newer synchronized draft typed while Commit is running', async () => {
+    const fixture = createOverviewFixture('changed-worktree');
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository') throw new Error('Expected Repository');
+    const worktree = current.snapshot.worktrees[0]!;
+    const pendingCommit =
+      deferred<Awaited<ReturnType<RepositoryOverviewSource['commit']>>>();
+    const commit = vi.fn(() => pendingCommit.promise);
+    const store = createRepositoryStore({ ...fixture.source, commit });
+    await vi.waitFor(() =>
+      expect(store.getSnapshot().commitDrafts[worktree.worktreeId]).toBe(''),
+    );
+    store.setCommitDraft(worktree.worktreeId, 'Submitted draft');
+    await vi.waitFor(() =>
+      expect(store.getSnapshot().commitDrafts[worktree.worktreeId]).toBe(
+        'Submitted draft',
+      ),
+    );
+    store.commit(false);
+    await vi.waitFor(() => expect(commit).toHaveBeenCalled());
+
+    store.setCommitDraft(worktree.worktreeId, 'New draft during Commit');
+    pendingCommit.resolve({
+      kind: 'succeeded',
+      operationId: operationIdSchema.parse(
+        'operation_00000000000000000000000000000004',
+      ),
+      result: {
+        kind: 'commit',
+        shortObjectId: 'abcdef1',
+        summary: 'Submitted draft',
+      },
+    });
+
+    await vi.waitFor(() =>
+      expect(
+        store.getSnapshot().commitOperations[worktree.worktreeId],
+      ).toMatchObject({ kind: 'result', result: { kind: 'succeeded' } }),
+    );
+    expect(store.getSnapshot().commitDrafts[worktree.worktreeId]).toBe(
+      'New draft during Commit',
+    );
+  });
+
+  it('tracks independent running Commits per Worktree', async () => {
+    const fixture = createOverviewFixture('many-worktrees');
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository') throw new Error('Expected Repository');
+    const first = current.snapshot.worktrees.find(
+      ({ role }) => role === 'main',
+    );
+    const second = current.snapshot.worktrees.find(
+      ({ role }) => role === 'linked',
+    );
+    if (first === undefined || second === undefined) {
+      throw new Error('Expected two Worktrees');
+    }
+    fixture.publish({
+      kind: 'repository',
+      snapshot: {
+        ...current.snapshot,
+        worktrees: current.snapshot.worktrees.map((worktree) => ({
+          ...worktree,
+          status: {
+            kind: 'changed' as const,
+            conflictCount: 0,
+            stagedCount: 1,
+            trackedChangeCount: 0,
+            untrackedCount: 0,
+          },
+        })),
+      },
+    });
+    const pending = new Map<string, ReturnType<typeof deferred<never>>>();
+    const commit = vi.fn(
+      (request: Parameters<RepositoryOverviewSource['commit']>[0]) => {
+        const operation = deferred<never>();
+        pending.set(request.worktreeId, operation);
+        return operation.promise;
+      },
+    );
+    const store = createRepositoryStore({ ...fixture.source, commit });
+    store.setCommitDraft(first.worktreeId, 'First Commit');
+    store.setCommitDraft(second.worktreeId, 'Second Commit');
+    store.commit(false);
+    await vi.waitFor(() => expect(commit).toHaveBeenCalledTimes(1));
+
+    store.selectWorktree(second.worktreeId);
+    store.commit(false);
+    await vi.waitFor(() => expect(commit).toHaveBeenCalledTimes(2));
+
+    expect(store.getSnapshot().commitOperations[first.worktreeId]).toEqual({
+      kind: 'running',
+      operationId: null,
+      cancellationRequested: false,
+    });
+    expect(store.getSnapshot().commitOperations[second.worktreeId]).toEqual({
+      kind: 'running',
+      operationId: null,
+      cancellationRequested: false,
+    });
+    expect(pending.size).toBe(2);
+  });
+
+  it('re-queries an Unknown Commit outcome and publishes later recovery', async () => {
+    const fixture = createOverviewFixture('changed-worktree');
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository') throw new Error('Expected Repository');
+    const worktree = current.snapshot.worktrees[0]!;
+    const operationId = operationIdSchema.parse(
+      'operation_00000000000000000000000000000005',
+    );
+    let backendDraft = { revision: 0, text: '' };
+    const updateCommitDraft = vi.fn(
+      async (
+        request: Parameters<RepositoryOverviewSource['updateCommitDraft']>[0],
+      ) => {
+        expect(request.expectedRevision).toBe(backendDraft.revision);
+        backendDraft = {
+          revision: backendDraft.revision + 1,
+          text: request.update.kind === 'set' ? request.update.text : '',
+        };
+        return { worktreeId: request.worktreeId, ...backendDraft };
+      },
+    );
+    const recoverOperation = vi.fn(async () => {
+      backendDraft = { revision: backendDraft.revision + 1, text: '' };
+      return {
+        kind: 'succeeded' as const,
+        operationId,
+        result: {
+          kind: 'commit' as const,
+          shortObjectId: '1234567',
+          summary: 'Recovered Commit',
+        },
+      };
+    });
+    const store = createRepositoryStore({
+      ...fixture.source,
+      getCommitDraft: async (worktreeId) => ({ worktreeId, ...backendDraft }),
+      updateCommitDraft,
+      async commit() {
+        return {
+          kind: 'unknown_outcome',
+          operationId,
+          code: 'reconciliation_incomplete',
+          message: 'Reconciliation is incomplete.',
+          recoveryAvailable: true,
+        };
+      },
+      recoverOperation,
+    });
+    store.setCommitDraft(worktree.worktreeId, 'Recover me');
+    store.commit(false);
+    await vi.waitFor(() =>
+      expect(
+        store.getSnapshot().commitOperations[worktree.worktreeId],
+      ).toMatchObject({ kind: 'result', result: { kind: 'unknown_outcome' } }),
+    );
+
+    store.recoverCommit(worktree.worktreeId);
+
+    await vi.waitFor(() =>
+      expect(
+        store.getSnapshot().commitOperations[worktree.worktreeId],
+      ).toMatchObject({ kind: 'result', result: { kind: 'succeeded' } }),
+    );
+    expect(recoverOperation).toHaveBeenCalledWith(operationId);
+    expect(store.getSnapshot().commitDrafts[worktree.worktreeId]).toBe('');
+    store.setCommitDraft(worktree.worktreeId, 'After recovery');
+    await vi.waitFor(() =>
+      expect(updateCommitDraft).toHaveBeenLastCalledWith(
+        expect.objectContaining({ expectedRevision: 2 }),
+      ),
+    );
+  });
+
+  it('preserves and reloads a later draft when Unknown Commit recovery succeeds', async () => {
+    const fixture = createOverviewFixture('changed-worktree');
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository') throw new Error('Expected Repository');
+    const worktree = current.snapshot.worktrees[0]!;
+    const operationId = operationIdSchema.parse(
+      'operation_00000000000000000000000000000007',
+    );
+    let backendDraft = { revision: 0, text: '' };
+    const source: RepositoryOverviewSource = {
+      ...fixture.source,
+      async getCommitDraft(worktreeId) {
+        return { worktreeId, ...backendDraft };
+      },
+      async updateCommitDraft(request) {
+        if (request.expectedRevision !== backendDraft.revision) {
+          throw new Error('Stale draft');
+        }
+        backendDraft = {
+          revision: backendDraft.revision + 1,
+          text: request.update.kind === 'set' ? request.update.text : '',
+        };
+        return { worktreeId: request.worktreeId, ...backendDraft };
+      },
+      async commit() {
+        return {
+          kind: 'unknown_outcome',
+          operationId,
+          code: 'reconciliation_incomplete',
+          message: 'Reconciliation is incomplete.',
+          recoveryAvailable: true,
+        };
+      },
+      async recoverOperation() {
+        return {
+          kind: 'succeeded',
+          operationId,
+          result: {
+            kind: 'commit',
+            shortObjectId: '7654321',
+            summary: 'Original draft',
+          },
+        };
+      },
+    };
+    const store = createRepositoryStore(source);
+    store.setCommitDraft(worktree.worktreeId, 'Original draft');
+    store.commit(false);
+    await vi.waitFor(() =>
+      expect(
+        store.getSnapshot().commitOperations[worktree.worktreeId],
+      ).toMatchObject({ kind: 'result', result: { kind: 'unknown_outcome' } }),
+    );
+    store.setCommitDraft(worktree.worktreeId, 'Later draft');
+    await vi.waitFor(() => expect(backendDraft.text).toBe('Later draft'));
+
+    store.recoverCommit(worktree.worktreeId);
+
+    await vi.waitFor(() =>
+      expect(
+        store.getSnapshot().commitOperations[worktree.worktreeId],
+      ).toMatchObject({ kind: 'result', result: { kind: 'succeeded' } }),
+    );
+    expect(store.getSnapshot().commitDrafts[worktree.worktreeId]).toBe(
+      'Later draft',
+    );
+    expect(backendDraft).toEqual({ revision: 2, text: 'Later draft' });
+  });
+
+  it('cancels an accepted Commit by its exact Operation ID and shows reconciliation', async () => {
+    const fixture = createOverviewFixture('changed-worktree');
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository') throw new Error('Expected Repository');
+    const worktree = current.snapshot.worktrees[0]!;
+    const operationId = operationIdSchema.parse(
+      'operation_00000000000000000000000000000006',
+    );
+    const cancelOperation = vi.fn(async () => ({
+      kind: 'unknown_outcome' as const,
+      operationId,
+      code: 'reconciliation_incomplete' as const,
+      message: 'Cancellation is reconciling.',
+      recoveryAvailable: true as const,
+    }));
+    const store = createRepositoryStore({
+      ...fixture.source,
+      commit(_request, onAccepted) {
+        onAccepted?.(operationId);
+        return new Promise<never>(() => undefined);
+      },
+      cancelOperation,
+    });
+    store.setCommitDraft(worktree.worktreeId, 'Cancel me');
+    store.commit(false);
+    await vi.waitFor(() =>
+      expect(store.getSnapshot().commitOperations[worktree.worktreeId]).toEqual(
+        {
+          kind: 'running',
+          operationId,
+          cancellationRequested: false,
+        },
+      ),
+    );
+
+    store.cancelCommit(worktree.worktreeId);
+
+    expect(cancelOperation).toHaveBeenCalledWith(operationId);
+    expect(store.getSnapshot().commitOperations[worktree.worktreeId]).toEqual({
+      kind: 'running',
+      operationId,
+      cancellationRequested: true,
+    });
+  });
 });
+
+function deferred<Value>() {
+  let resolve!: (value: Value) => void;
+  const promise = new Promise<Value>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}

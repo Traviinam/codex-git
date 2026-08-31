@@ -106,6 +106,29 @@ function createMutableFixture(
       async mutateFiles() {
         throw new Error('File mutations are not configured for this fixture.');
       },
+      async getCommitDraft(worktreeId) {
+        return { worktreeId, revision: 0, text: '' };
+      },
+      async updateCommitDraft(request) {
+        return {
+          worktreeId: request.worktreeId,
+          revision: request.expectedRevision + 1,
+          text: request.update.kind === 'set' ? request.update.text : '',
+        };
+      },
+      async commit() {
+        throw new Error('Commit is not configured for this fixture.');
+      },
+      async recoverOperation() {
+        throw new Error(
+          'Operation recovery is not configured for this fixture.',
+        );
+      },
+      async cancelOperation() {
+        throw new Error(
+          'Operation cancellation is not configured for this fixture.',
+        );
+      },
       async searchBranches() {
         return { refsRevision: 0, candidates: [] };
       },

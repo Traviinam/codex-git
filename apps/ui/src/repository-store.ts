@@ -49,6 +49,16 @@ export type RemoteOperationState =
     }
   | { readonly kind: 'failed'; readonly message: string };
 
+export type CommitOperationState =
+  | { readonly kind: 'idle' }
+  | {
+      readonly kind: 'running';
+      readonly operationId: import('@codex-git/protocol').OperationId | null;
+      readonly cancellationRequested: boolean;
+    }
+  | { readonly kind: 'result'; readonly result: OperationResult }
+  | { readonly kind: 'failed'; readonly message: string };
+
 import type {
   RepositoryOverviewSnapshot,
   RepositoryOverviewSource,
@@ -60,7 +70,7 @@ export interface RepositoryStoreSnapshot {
   readonly source: RepositoryOverviewSourceState;
   readonly selectedWorktreeId: WorktreeId | null;
   readonly searchQuery: string;
-  readonly commitDrafts: Readonly<Record<string, string>>;
+  readonly commitDrafts: Readonly<Partial<Record<WorktreeId, string>>>;
   readonly selectedFileId: FileId | null;
   readonly diff: DiffLoadState;
   readonly selectionNotice: string | null;
@@ -68,6 +78,9 @@ export interface RepositoryStoreSnapshot {
   readonly branchPicker: BranchPickerState;
   readonly remoteOperation: RemoteOperationState;
   readonly fileMutationResult: OperationResult | null;
+  readonly commitOperations: Readonly<
+    Partial<Record<WorktreeId, CommitOperationState>>
+  >;
 }
 
 export interface RepositoryStore {
@@ -78,6 +91,10 @@ export interface RepositoryStore {
   selectWorktree(worktreeId: WorktreeId): void;
   setSearchQuery(query: string): void;
   setCommitDraft(worktreeId: WorktreeId, draft: string): void;
+  clearCommitDraft(worktreeId: WorktreeId): void;
+  commit(confirmDetachedHead: boolean): void;
+  cancelCommit(worktreeId: WorktreeId): void;
+  recoverCommit(worktreeId: WorktreeId): void;
   selectFile(fileId: FileId | null): void;
   requestRefresh(): void;
   requestFetch(
@@ -106,7 +123,16 @@ export function createRepositoryStore(
   let selectedGeneration = initialWorktree?.generation ?? null;
   let selectedHeadKey = headSelectionKey(initialWorktree);
   let searchQuery = '';
-  let commitDrafts: Readonly<Record<string, string>> = {};
+  let commitDrafts: Readonly<Partial<Record<WorktreeId, string>>> = {};
+  const draftRevisions = new Map<WorktreeId, number>();
+  const draftTouched = new Set<WorktreeId>();
+  const draftLoads = new Map<WorktreeId, Promise<void>>();
+  const draftWrites = new Map<WorktreeId, Promise<void>>();
+  const draftWriteFailures = new Set<WorktreeId>();
+  const commitSubmissions = new Map<
+    WorktreeId,
+    { readonly revision: number; readonly text: string }
+  >();
   let selectedFileId: FileId | null = null;
   let diff: DiffLoadState = { kind: 'idle' };
   let diffRequestGeneration = 0;
@@ -116,11 +142,16 @@ export function createRepositoryStore(
   let branchRequestGeneration = 0;
   let remoteOperation: RemoteOperationState = { kind: 'idle' };
   let fileMutationResult: OperationResult | null = null;
+  let commitOperations: Readonly<
+    Partial<Record<WorktreeId, CommitOperationState>>
+  > = {};
   let fileFollow:
     | { readonly displayPath: string; readonly kind: 'stage' | 'unstage' }
     | undefined;
   let storeSnapshot = buildSnapshot();
   let disposed = false;
+
+  loadVisibleDrafts(sourceState);
 
   const unsubscribeSource = source.subscribe(() => {
     if (disposed) return;
@@ -132,6 +163,7 @@ export function createRepositoryStore(
       selected !== null && headSelectionKey(selected) !== selectedHeadKey;
 
     sourceState = nextSource;
+    loadVisibleDrafts(nextSource);
     if (identityChanged) {
       const replacement = selectInitialWorktree(nextSource);
       const previousSelection = selectedWorktreeId;
@@ -219,7 +251,194 @@ export function createRepositoryStore(
       if (disposed) return;
       if (commitDrafts[worktreeId] === draft) return;
       commitDrafts = { ...commitDrafts, [worktreeId]: draft };
+      draftTouched.add(worktreeId);
       emit();
+      queueDraftWrite(worktreeId);
+    },
+    clearCommitDraft(worktreeId) {
+      if (disposed) return;
+      commitDrafts = { ...commitDrafts, [worktreeId]: '' };
+      draftTouched.add(worktreeId);
+      emit();
+      queueDraftWrite(worktreeId, true);
+    },
+    commit(confirmDetachedHead) {
+      if (disposed || selectedWorktreeId === null) {
+        return;
+      }
+      const worktree = findWorktree(sourceState, selectedWorktreeId);
+      if (
+        worktree === null ||
+        commitOperations[worktree.worktreeId]?.kind === 'running'
+      ) {
+        return;
+      }
+      commitOperations = {
+        ...commitOperations,
+        [worktree.worktreeId]: {
+          kind: 'running',
+          operationId: null,
+          cancellationRequested: false,
+        },
+      };
+      emit();
+      void (draftWrites.get(worktree.worktreeId) ?? Promise.resolve())
+        .then(() => {
+          if (draftWriteFailures.has(worktree.worktreeId)) {
+            throw new Error('The Commit Draft could not be synchronized.');
+          }
+          const draftRevision = draftRevisions.get(worktree.worktreeId);
+          if (draftRevision === undefined) {
+            throw new Error('The Commit Draft is not synchronized.');
+          }
+          const submittedText = commitDrafts[worktree.worktreeId] ?? '';
+          commitSubmissions.set(worktree.worktreeId, {
+            revision: draftRevision,
+            text: submittedText,
+          });
+          return source
+            .commit(
+              {
+                worktreeId: worktree.worktreeId,
+                expectedWorktreeRevision: worktree.worktreeRevision,
+                draftRevision,
+                confirmDetachedHead,
+              },
+              (operationId) => {
+                if (
+                  disposed ||
+                  commitOperations[worktree.worktreeId]?.kind !== 'running'
+                ) {
+                  return;
+                }
+                commitOperations = {
+                  ...commitOperations,
+                  [worktree.worktreeId]: {
+                    kind: 'running',
+                    operationId,
+                    cancellationRequested: false,
+                  },
+                };
+                emit();
+              },
+            )
+            .then((result) => ({
+              result,
+              submittedDraft: { revision: draftRevision, text: submittedText },
+            }));
+        })
+        .then(({ result, submittedDraft }) => {
+          if (disposed) return;
+          commitOperations = {
+            ...commitOperations,
+            [worktree.worktreeId]: { kind: 'result', result },
+          };
+          if (
+            result.kind === 'succeeded' &&
+            draftRevisions.get(worktree.worktreeId) ===
+              submittedDraft.revision &&
+            (commitDrafts[worktree.worktreeId] ?? '') === submittedDraft.text
+          ) {
+            commitDrafts = { ...commitDrafts, [worktree.worktreeId]: '' };
+            draftRevisions.set(
+              worktree.worktreeId,
+              submittedDraft.revision + 1,
+            );
+          }
+          if (result.kind !== 'unknown_outcome') {
+            commitSubmissions.delete(worktree.worktreeId);
+          }
+          emit();
+        })
+        .catch(() => {
+          if (disposed) return;
+          commitOperations = {
+            ...commitOperations,
+            [worktree.worktreeId]: {
+              kind: 'failed',
+              message: 'The Commit could not be submitted.',
+            },
+          };
+          emit();
+        });
+    },
+    cancelCommit(worktreeId) {
+      const operation = commitOperations[worktreeId];
+      if (
+        disposed ||
+        operation?.kind !== 'running' ||
+        operation.operationId === null ||
+        operation.cancellationRequested
+      ) {
+        return;
+      }
+      commitOperations = {
+        ...commitOperations,
+        [worktreeId]: { ...operation, cancellationRequested: true },
+      };
+      emit();
+      void source.cancelOperation(operation.operationId).catch(() => {
+        if (disposed) return;
+        const current = commitOperations[worktreeId];
+        if (current?.kind !== 'running') return;
+        commitOperations = {
+          ...commitOperations,
+          [worktreeId]: { ...current, cancellationRequested: false },
+        };
+        emit();
+      });
+    },
+    recoverCommit(worktreeId) {
+      const operation = commitOperations[worktreeId];
+      if (
+        disposed ||
+        operation?.kind !== 'result' ||
+        operation.result.kind !== 'unknown_outcome'
+      ) {
+        return;
+      }
+      commitOperations = {
+        ...commitOperations,
+        [worktreeId]: {
+          kind: 'running',
+          operationId: null,
+          cancellationRequested: false,
+        },
+      };
+      emit();
+      void source
+        .recoverOperation(operation.result.operationId)
+        .then(async (result) => {
+          if (disposed) return;
+          if (result.kind === 'succeeded' && result.result.kind === 'commit') {
+            const submitted = commitSubmissions.get(worktreeId);
+            if (submitted !== undefined) {
+              await reconcileRecoveredDraft(worktreeId, submitted).catch(() => {
+                selectionNotice =
+                  'The Commit succeeded, but its Commit Draft could not be reloaded. Refresh and verify before editing.';
+              });
+            }
+          }
+          if (result.kind !== 'unknown_outcome') {
+            commitSubmissions.delete(worktreeId);
+          }
+          commitOperations = {
+            ...commitOperations,
+            [worktreeId]: { kind: 'result', result },
+          };
+          emit();
+        })
+        .catch(() => {
+          if (disposed) return;
+          commitOperations = {
+            ...commitOperations,
+            [worktreeId]: {
+              kind: 'failed',
+              message: 'Commit recovery could not refresh the outcome.',
+            },
+          };
+          emit();
+        });
     },
     selectFile(fileId) {
       if (disposed) return;
@@ -491,6 +710,7 @@ export function createRepositoryStore(
       branchPicker,
       remoteOperation,
       fileMutationResult,
+      commitOperations,
     };
   }
 
@@ -502,6 +722,106 @@ export function createRepositoryStore(
   function clearDiff() {
     diffRequestGeneration += 1;
     diff = { kind: 'idle' };
+  }
+
+  function loadVisibleDrafts(next: RepositoryOverviewSourceState) {
+    if (next.kind !== 'repository') return;
+    for (const worktree of next.snapshot.worktrees) {
+      if (draftRevisions.has(worktree.worktreeId)) continue;
+      if (draftLoads.has(worktree.worktreeId)) continue;
+      const load = source
+        .getCommitDraft(worktree.worktreeId)
+        .then((draft) => {
+          if (disposed) return;
+          draftRevisions.set(worktree.worktreeId, draft.revision);
+          if (!draftTouched.has(worktree.worktreeId)) {
+            commitDrafts = {
+              ...commitDrafts,
+              [worktree.worktreeId]: draft.text,
+            };
+            emit();
+          }
+          if (draftTouched.has(worktree.worktreeId)) {
+            queueDraftWrite(worktree.worktreeId);
+          }
+        })
+        .catch(() => {
+          draftWriteFailures.add(worktree.worktreeId);
+        })
+        .finally(() => draftLoads.delete(worktree.worktreeId));
+      draftLoads.set(worktree.worktreeId, load);
+    }
+  }
+
+  function queueDraftWrite(worktreeId: WorktreeId, clear = false) {
+    if (draftWrites.has(worktreeId)) return;
+    const write = async () => {
+      await draftLoads.get(worktreeId);
+      while (!disposed) {
+        const expectedRevision = draftRevisions.get(worktreeId);
+        if (expectedRevision === undefined) {
+          throw new Error('The Commit Draft revision is unavailable.');
+        }
+        const text = commitDrafts[worktreeId] ?? '';
+        let draft;
+        try {
+          draft = await source.updateCommitDraft({
+            worktreeId,
+            expectedRevision,
+            update:
+              clear && text.length === 0
+                ? { kind: 'clear' }
+                : { kind: 'set', text },
+          });
+        } catch {
+          const current = await source.getCommitDraft(worktreeId);
+          draftRevisions.set(worktreeId, current.revision);
+          draft = await source.updateCommitDraft({
+            worktreeId,
+            expectedRevision: current.revision,
+            update:
+              clear && text.length === 0
+                ? { kind: 'clear' }
+                : { kind: 'set', text },
+          });
+        }
+        draftRevisions.set(worktreeId, draft.revision);
+        draftWriteFailures.delete(worktreeId);
+        if ((commitDrafts[worktreeId] ?? '') === draft.text) return;
+        clear = false;
+      }
+    };
+    const pending = write()
+      .catch(() => {
+        draftWriteFailures.add(worktreeId);
+        selectionNotice =
+          'The Commit Draft could not be synchronized. Commit remains unavailable.';
+        emit();
+      })
+      .finally(() => draftWrites.delete(worktreeId));
+    draftWrites.set(worktreeId, pending);
+  }
+
+  async function reconcileRecoveredDraft(
+    worktreeId: WorktreeId,
+    submitted: { readonly revision: number; readonly text: string },
+  ) {
+    await draftWrites.get(worktreeId);
+    const backend = await source.getCommitDraft(worktreeId);
+    if (disposed) return;
+    const localText = commitDrafts[worktreeId] ?? '';
+    const unchanged =
+      draftRevisions.get(worktreeId) === submitted.revision &&
+      localText === submitted.text;
+    draftRevisions.set(worktreeId, backend.revision);
+    if (unchanged) {
+      commitDrafts = { ...commitDrafts, [worktreeId]: backend.text };
+      return;
+    }
+    if (backend.text !== localText) {
+      draftTouched.add(worktreeId);
+      queueDraftWrite(worktreeId);
+    }
   }
 }
 

@@ -16,6 +16,21 @@ const loadingStore = createRepositoryStore({
   mutateFiles: async () => {
     throw new Error('File mutations are unavailable while loading.');
   },
+  getCommitDraft: async () => {
+    throw new Error('Commit Drafts are unavailable while loading.');
+  },
+  updateCommitDraft: async () => {
+    throw new Error('Commit Drafts are unavailable while loading.');
+  },
+  commit: async () => {
+    throw new Error('Commit is unavailable while loading.');
+  },
+  recoverOperation: async () => {
+    throw new Error('Operation recovery is unavailable while loading.');
+  },
+  cancelOperation: async () => {
+    throw new Error('Operation cancellation is unavailable while loading.');
+  },
   searchBranches: async () => ({ refsRevision: 0, candidates: [] }),
   switchBranch: async () => {
     throw new Error('Branch switching is unavailable while loading.');
