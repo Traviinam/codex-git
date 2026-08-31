@@ -152,7 +152,10 @@ class RemoteDedicatedRendererConnection implements DedicatedRendererConnection {
     if (this.closed) {
       return { status: 'rejected' };
     }
-    if (action.kind === 'restore-native-surface') {
+    if (
+      action.kind === 'restore-native-surface' ||
+      action.kind === 'open-codex-context'
+    ) {
       await evaluate(this.session, 'globalThis.__codexGitBridge?.restore()');
       this.open = false;
       return { status: 'succeeded' };

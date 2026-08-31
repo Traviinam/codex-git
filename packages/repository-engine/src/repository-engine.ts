@@ -38,6 +38,11 @@ import {
   createRemoteIdentityState,
   type RemoteIdentityState,
 } from './remote-observation.js';
+import {
+  resolveWorktreeProvenance,
+  type CodexMetadataAdapter,
+  type WorktreeProvenance,
+} from './worktree-provenance.js';
 
 const GIT_OUTPUT_LIMIT_BYTES = 4 * 1_024 * 1_024;
 const GIT_TIMEOUT_MILLISECONDS = 10_000;
@@ -63,6 +68,7 @@ export interface DiscoveredWorktree {
   readonly head: DiscoveredHead;
   readonly gitLock: GitLockState;
   readonly availability: WorktreeAvailability;
+  readonly provenance?: WorktreeProvenance;
 }
 
 export type DiscoveredHead =
@@ -124,7 +130,13 @@ interface CanonicalRegistration {
   readonly unavailableReason: string | null;
 }
 
-export function createRepositoryEngine(): RepositoryEngine {
+export interface RepositoryEngineOptions {
+  readonly metadata?: CodexMetadataAdapter;
+}
+
+export function createRepositoryEngine(
+  options: RepositoryEngineOptions = {},
+): RepositoryEngine {
   return {
     async open(anchor) {
       const resolved = await resolveAnchor(anchor);
@@ -200,6 +212,11 @@ export function createRepositoryEngine(): RepositoryEngine {
             : { kind: 'all' };
           const worktreeIds =
             scope.kind === 'all' ? undefined : new Set(scope.worktreeIds);
+          discovery = await attachProvenance(
+            discovery,
+            options.metadata,
+            signal,
+          );
           const observation = await createRepositoryObserver(
             runGit,
             ids,
@@ -244,6 +261,29 @@ export function createRepositoryEngine(): RepositoryEngine {
         }),
       );
     },
+  };
+}
+
+async function attachProvenance(
+  discovery: RepositoryDiscovery,
+  adapter: CodexMetadataAdapter | undefined,
+  signal: AbortSignal,
+): Promise<RepositoryDiscovery> {
+  let metadata: Awaited<ReturnType<CodexMetadataAdapter['read']>> = [];
+  try {
+    metadata = (await adapter?.read(signal)) ?? [];
+  } catch {
+    // Optional host metadata must never make Git inventory unavailable.
+  }
+  return {
+    ...discovery,
+    worktrees: discovery.worktrees.map((worktree) => ({
+      ...worktree,
+      provenance:
+        worktree.canonicalPath === null
+          ? { kind: 'unclassified' as const }
+          : resolveWorktreeProvenance(worktree.canonicalPath, metadata),
+    })),
   };
 }
 

@@ -209,8 +209,40 @@ describe('Repository overview interactions', () => {
     expect(container.textContent).toContain('Binary file · 4,096 bytes');
     expect(container.querySelector('pre')).toBeNull();
     expect(button('Open in Default App')).toBeDefined();
+    expect(button('Reveal in Finder')).toBeDefined();
+    expect(button('Copy Absolute Path')).toBeDefined();
     await act(async () => button('Copy Relative Path').click());
     expect(container.textContent).toContain('Relative path: README.md');
+  });
+
+  it('reports exact Worktree copy results and safe navigation fallback', async () => {
+    const fixture = createOverviewFixture('one-worktree');
+    const store = createRepositoryStore({
+      ...fixture.source,
+      async requestNativeAction(request) {
+        return request.kind === 'copy_absolute_path'
+          ? {
+              kind: 'copy_text',
+              text: '/Users/leyoonafr/Projects/codex-git',
+            }
+          : {
+              kind: 'unavailable',
+              message:
+                'The exact target is no longer available. Refresh or use a safe copy action.',
+            };
+      },
+    });
+    act(() => root.render(<App store={store} />));
+
+    await act(async () => button('Copy Absolute Path for codex-git').click());
+    expect(container.textContent).toContain(
+      'Value: /Users/leyoonafr/Projects/codex-git',
+    );
+
+    await act(async () => button('Reveal codex-git in Finder').click());
+    expect(container.textContent).toContain(
+      'The exact target is no longer available. Refresh or use a safe copy action.',
+    );
   });
 
   it('shows Conflict index stages in the default side-by-side review', async () => {

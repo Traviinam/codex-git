@@ -1,4 +1,4 @@
-import { basename } from 'node:path';
+import { basename, isAbsolute } from 'node:path';
 
 import type {
   RepositoryOpenResult,
@@ -10,9 +10,24 @@ import {
   type RepositorySnapshotResult,
 } from '@codex-git/protocol';
 
+export interface HostNavigationContext {
+  readonly canonicalProjectPath: string | null;
+  readonly openCodexContext: boolean;
+  readonly openFileInCodex: boolean;
+  readonly taskId: string | null;
+}
+
+const noHostNavigation: HostNavigationContext = {
+  canonicalProjectPath: null,
+  openCodexContext: false,
+  openFileInCodex: false,
+  taskId: null,
+};
+
 export function toProtocolRepositorySnapshot(
   result: RepositoryOpenResult,
   projectPath: string,
+  hostNavigation: HostNavigationContext = noHostNavigation,
 ): RepositorySnapshotResult {
   if (result.kind === 'not_repository') {
     return {
@@ -56,6 +71,7 @@ export function toProtocolRepositorySnapshot(
         candidate.upstream.kind === 'tracking'
           ? (remoteFetches.get(candidate.upstream.remoteId) ?? null)
           : lastSuccessfulFetchAt(source.fetch),
+        hostNavigation,
       ),
     ),
     remotes: source.remotes.map(({ remoteId, displayName, host }) => ({
@@ -72,7 +88,11 @@ export function toProtocolRepositorySnapshot(
   });
 }
 
-function worktree(source: PublishedWorktreeSnapshot, fetchedAt: string | null) {
+function worktree(
+  source: PublishedWorktreeSnapshot,
+  fetchedAt: string | null,
+  hostNavigation: HostNavigationContext,
+) {
   const path = source.canonicalPath ?? source.displayPath;
   return {
     worktreeId: source.worktreeId,
@@ -101,6 +121,14 @@ function worktree(source: PublishedWorktreeSnapshot, fetchedAt: string | null) {
             },
     indexTree: null,
     status: worktreeStatus(source),
+    provenance:
+      source.provenance.kind === 'codex_task'
+        ? {
+            kind: source.provenance.kind,
+            title: source.provenance.task.title,
+            status: source.provenance.task.status,
+          }
+        : source.provenance,
     upstream: upstream(source, fetchedAt),
     changes: source.changes.map(
       ({
@@ -116,15 +144,20 @@ function worktree(source: PublishedWorktreeSnapshot, fetchedAt: string | null) {
         baseline,
         displayPath,
         previousDisplayPath,
-        nativeTargets: [nativeFileTarget(source, nativeTargetId, fileId)],
+        nativeTargets: [
+          nativeFileTarget(source, nativeTargetId, fileId, hostNavigation),
+        ],
       }),
     ),
-    nativeTargets: [
-      {
-        targetId: source.nativeTargetId,
-        actions: ['open_terminal'] as const,
-      },
-    ],
+    nativeTargets:
+      source.nativeTargetId === null
+        ? []
+        : [
+            {
+              targetId: source.nativeTargetId,
+              actions: worktreeNativeActions(source, hostNavigation),
+            },
+          ],
   };
 }
 
@@ -132,6 +165,7 @@ function nativeFileTarget(
   worktree: PublishedWorktreeSnapshot,
   targetId: PublishedWorktreeSnapshot['changes'][number]['nativeTargetId'],
   fileId: PublishedWorktreeSnapshot['changes'][number]['fileId'],
+  hostNavigation: HostNavigationContext,
 ) {
   const change = worktree.changes.find(
     (candidate) => candidate.fileId === fileId,
@@ -144,11 +178,76 @@ function nativeFileTarget(
   }
   return {
     targetId,
-    actions:
-      change.workingFilePresent && pathIsUtf8
-        ? (['open_default_app', 'copy_relative_path'] as const)
-        : (['copy_relative_path'] as const),
+    actions: fileNativeActions(
+      worktree,
+      pathIsUtf8,
+      change.workingFilePresent,
+      hostNavigation,
+    ),
   };
+}
+
+function worktreeNativeActions(
+  worktree: PublishedWorktreeSnapshot,
+  hostNavigation: HostNavigationContext,
+) {
+  const path = worktree.canonicalPath ?? worktree.displayPath;
+  const copyActions = [
+    ...(isAbsolute(path) ? (['copy_absolute_path'] as const) : []),
+    'copy_branch_or_sha' as const,
+  ];
+  const hostActions =
+    hostNavigation.openCodexContext &&
+    hostContextMatches(worktree, hostNavigation)
+      ? (['open_codex_context'] as const)
+      : [];
+  return worktree.canonicalPath !== null &&
+    worktree.availability.kind === 'available'
+    ? ([
+        'open_terminal',
+        'reveal_in_finder',
+        ...hostActions,
+        ...copyActions,
+      ] as const)
+    : [...hostActions, ...copyActions];
+}
+
+function fileNativeActions(
+  worktree: PublishedWorktreeSnapshot,
+  pathIsUtf8: boolean,
+  workingFilePresent: boolean,
+  hostNavigation: HostNavigationContext,
+) {
+  if (!pathIsUtf8) return ['copy_relative_path'] as const;
+  const copyActions = [
+    'copy_relative_path' as const,
+    ...(worktree.canonicalPath === null
+      ? []
+      : (['copy_absolute_path'] as const)),
+  ];
+  return workingFilePresent && worktree.canonicalPath !== null
+    ? ([
+        'open_default_app',
+        'reveal_in_finder',
+        ...(hostNavigation.openFileInCodex &&
+        hostContextMatches(worktree, hostNavigation)
+          ? (['open_file_in_codex'] as const)
+          : []),
+        ...copyActions,
+      ] as const)
+    : copyActions;
+}
+
+function hostContextMatches(
+  worktree: PublishedWorktreeSnapshot,
+  hostNavigation: HostNavigationContext,
+): boolean {
+  return (
+    (worktree.provenance.kind === 'codex_task' &&
+      worktree.provenance.task.id === hostNavigation.taskId) ||
+    (worktree.canonicalPath !== null &&
+      worktree.canonicalPath === hostNavigation.canonicalProjectPath)
+  );
 }
 
 function refresh(source: RefreshState) {

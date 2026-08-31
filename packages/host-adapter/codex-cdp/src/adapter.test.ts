@@ -199,6 +199,42 @@ describe('CodexCdpHostAdapter', () => {
     await result.connection.close();
   });
 
+  it('restores the proven current Codex context but does not claim file navigation', async () => {
+    const dom = compatibleDom();
+    const result = await new CodexCdpHostAdapter({
+      rendererSource: new FixtureRendererSource(
+        fixtureRenderer(dom, '26.820.60940'),
+      ),
+    }).attach({
+      title: 'Codex Git',
+      url: new URL('http://127.0.0.1:4173'),
+    });
+    if (result.kind !== 'attached') {
+      throw new Error('Expected the compatible Codex renderer to attach');
+    }
+    documentEntry(dom)?.click();
+
+    expect(result.connection.capabilities()).toEqual({
+      openCodexContext: true,
+      openFileInCodex: false,
+    });
+    await expect(
+      result.connection.perform({
+        kind: 'open-codex-context',
+        targetId: 'native_0123456789abcdef0123456789abcdef',
+      }),
+    ).resolves.toEqual({ status: 'succeeded' });
+    expect(documentFrame(dom)).toBeNull();
+    await expect(
+      result.connection.perform({
+        kind: 'open-file-in-codex',
+        targetId: 'native_0123456789abcdef0123456789abcdef',
+      }),
+    ).resolves.toEqual({ status: 'unsupported' });
+
+    await result.connection.close();
+  });
+
   it('forwards Current Project, theme, and current task context changes', async () => {
     const dom = compatibleDom();
     const renderer = new FixtureRenderer(dom, '26.820.60940', {

@@ -521,6 +521,7 @@ const repositorySnapshot = {
       },
       indexTree: null,
       status: { kind: 'clean' },
+      provenance: { kind: 'unclassified' },
       upstream: { kind: 'unpublished', remoteName: null, fetchedAt: null },
       changes: [],
       nativeTargets: [],

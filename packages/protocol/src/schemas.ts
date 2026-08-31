@@ -191,6 +191,18 @@ export const worktreeStatusSchema = z.discriminatedUnion('kind', [
   }),
 ]);
 
+export const worktreeProvenanceSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('codex_task'),
+    title: z.string().min(1).max(1_024),
+    status: z.string().min(1).max(128),
+  }),
+  z.strictObject({ kind: z.literal('scheduled') }),
+  z.strictObject({ kind: z.literal('permanent') }),
+  z.strictObject({ kind: z.literal('external') }),
+  z.strictObject({ kind: z.literal('unclassified') }),
+]);
+
 export const operationSummarySchema = z.strictObject({
   operationId: operationIdSchema,
   category: z.enum([
@@ -263,6 +275,7 @@ export const worktreeSnapshotSchema = z.strictObject({
   head: headStateSchema,
   indexTree: objectIdSchema.nullable(),
   status: worktreeStatusSchema,
+  provenance: worktreeProvenanceSchema,
   upstream: upstreamOverviewSchema,
   changes: z.array(changedFileSchema).max(2_000).readonly(),
   nativeTargets: z.array(nativeTargetDescriptorSchema).readonly(),

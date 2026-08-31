@@ -149,7 +149,7 @@ const changedFileIds = [1, 2, 3, 4].map((index) =>
 const changedNativeTargetIds = [1, 2, 3, 4].map((index) =>
   nativeTargetIdSchema.parse(`native_${index.toString(16).padStart(32, '0')}`),
 );
-const worktreeNativeTargetId = nativeTargetIdSchema.parse(
+const mainNativeTargetId = nativeTargetIdSchema.parse(
   'native_00000000000000000000000000000010',
 );
 
@@ -179,9 +179,18 @@ export const oneWorktree: RepositoryOverviewSnapshot = {
         objectId: '0123456789abcdef0123456789abcdef01234567',
       },
       status: { kind: 'clean' },
+      provenance: { kind: 'unclassified' },
       changes: [],
       nativeTargets: [
-        { targetId: worktreeNativeTargetId, actions: ['open_terminal'] },
+        {
+          targetId: mainNativeTargetId,
+          actions: [
+            'open_terminal',
+            'reveal_in_finder',
+            'copy_absolute_path',
+            'copy_branch_or_sha',
+          ],
+        },
       ],
       upstream: {
         kind: 'tracking',
@@ -249,7 +258,12 @@ export const changedWorktree: RepositoryOverviewSnapshot = {
 function nativeFileTarget(index: number) {
   return {
     targetId: changedNativeTargetIds[index]!,
-    actions: ['open_default_app', 'copy_relative_path'] as const,
+    actions: [
+      'open_default_app',
+      'reveal_in_finder',
+      'copy_relative_path',
+      'copy_absolute_path',
+    ] as const,
   };
 }
 
@@ -274,7 +288,14 @@ const linkedWorktrees: RepositoryOverviewSnapshot['worktrees'] = Array.from(
       role: 'linked' as const,
       displayName,
       path: `/private/tmp/codex-git-${displayName}`,
-      codexTitle: index === 2 ? 'Build the adaptive overview' : undefined,
+      provenance:
+        index === 2
+          ? {
+              kind: 'codex_task' as const,
+              title: 'Build the adaptive overview',
+              status: 'active',
+            }
+          : { kind: 'unclassified' as const },
       freshness: { kind: 'current' as const },
       head: {
         kind: 'local_branch' as const,

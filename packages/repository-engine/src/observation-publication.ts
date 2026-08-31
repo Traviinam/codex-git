@@ -14,6 +14,7 @@ import type {
 } from './repository-observation.js';
 import type { FileId, NativeTargetId } from '@codex-git/protocol';
 import type { RemoteSnapshot } from './remote-observation.js';
+import type { WorktreeProvenance } from './worktree-provenance.js';
 
 export interface PublishedRepositoryObservation {
   readonly refs: readonly RefSnapshot[];
@@ -27,16 +28,17 @@ export const privateWorktreeIdentityEvidence = Symbol(
 
 export interface PublishedObservationWorktree extends Omit<
   DiscoveredWorktree,
-  'canonicalPathBytes' | 'privateIdentityEvidence'
+  'canonicalPathBytes' | 'privateIdentityEvidence' | 'provenance'
 > {
-  readonly nativeTargetId: NativeTargetId;
   readonly [privateWorktreeIdentityEvidence]?: string;
   readonly worktreeRevision: number;
+  readonly nativeTargetId: NativeTargetId | null;
   readonly freshness: WorktreeFreshness;
   readonly index: IndexSnapshot | null;
   readonly status: WorktreeStatusSummary | null;
   readonly changes: readonly PublishedChangedFile[];
   readonly upstream: UpstreamSnapshot;
+  readonly provenance: WorktreeProvenance;
 }
 
 export type PublishedChangedFile = ChangedFileObservation & {
@@ -112,9 +114,13 @@ export function publishObservedFacts(
         : publishWorktreeObservation(worktree, observed, prior);
     const candidate: Omit<
       PublishedObservationWorktree,
-      'nativeTargetId' | 'worktreeRevision' | 'changes'
+      'worktreeRevision' | 'changes'
     > & { readonly changes: readonly ChangedFileObservation[] } = {
       worktreeId: worktree.worktreeId,
+      nativeTargetId:
+        prior?.generation === worktree.generation
+          ? prior.nativeTargetId
+          : (issueNativeTargetId?.() ?? null),
       generation: worktree.generation,
       [privateWorktreeIdentityEvidence]: worktree.privateIdentityEvidence,
       displayPath: worktree.displayPath,
@@ -123,18 +129,23 @@ export function publishObservedFacts(
       head: observedFacts.head,
       gitLock: worktree.gitLock,
       availability: worktree.availability,
+      provenance: worktree.provenance ?? { kind: 'unclassified' },
       freshness: observedFacts.freshness,
       index: observedFacts.index,
       status: observedFacts.status,
       changes: observedFacts.changes,
       upstream: observedFacts.upstream,
     };
-    const changed =
+    const gitFactsChanged =
       prior === undefined ||
       worktreeEvidence(candidate) !== worktreeEvidence(prior);
+    const provenanceChanged =
+      prior === undefined ||
+      JSON.stringify(candidate.provenance) !== JSON.stringify(prior.provenance);
+    const changed = gitFactsChanged || provenanceChanged;
     worktreeChanged ||= changed;
     const changes =
-      !changed && prior !== undefined
+      !gitFactsChanged && prior !== undefined
         ? prior.changes
         : observedFacts.changes.map((change) =>
             publishedChangedFile(

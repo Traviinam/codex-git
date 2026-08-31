@@ -5,8 +5,16 @@ export {
   type GitLockState,
   type RepositoryDiscovery,
   type RepositoryEngine,
+  type RepositoryEngineOptions,
   type WorktreeAvailability,
 } from './repository-engine.js';
+export {
+  resolveWorktreeProvenance,
+  type CodexMetadataAdapter,
+  type CodexTaskMetadata,
+  type CodexWorktreeMetadata,
+  type WorktreeProvenance,
+} from './worktree-provenance.js';
 export {
   type ChangedFileObservation,
   type InProgressGitOperation,
@@ -30,9 +38,9 @@ export {
 } from './repository-publication.js';
 export {
   type FileNativeTarget,
+  type WorktreeNativeTarget,
   type RemoteFetchResult,
   type RepositoryFetchRequest,
   type RepositorySession,
-  type WorktreeNativeTarget,
   RepositoryTargetFailure,
 } from './repository-session.js';

@@ -52,7 +52,7 @@ export interface WorktreeOverviewSnapshot {
   readonly displayName: string;
   readonly path: string;
   readonly availability?: ProtocolWorktree['availability'];
-  readonly codexTitle?: string;
+  readonly provenance: ProtocolWorktree['provenance'];
   readonly freshness: ProtocolWorktree['freshness'];
   readonly head: ProtocolWorktree['head'];
   readonly status: ProtocolWorktree['status'];

@@ -30,9 +30,12 @@ export interface CodexRuntime extends StandaloneRuntime {
 export async function startCodexRuntime(
   options: CodexRuntimeOptions,
 ): Promise<CodexRuntime> {
-  const standalone = await startStandaloneRuntime(options);
   let instance: DedicatedCodexInstance | null = null;
   let connection: HostConnection | null = null;
+  const standalone = await startStandaloneRuntime({
+    ...options,
+    nativeHostConnection: () => connection,
+  });
   let host: 'codex' | 'standalone' = 'standalone';
   let closing = false;
   let monitor = Promise.resolve();

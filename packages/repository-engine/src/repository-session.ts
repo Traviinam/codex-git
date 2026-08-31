@@ -34,6 +34,7 @@ import type {
   RepositorySnapshot,
   ScopedRepositoryPublicationSession,
 } from './repository-publication.js';
+import type { WorktreeProvenance } from './worktree-provenance.js';
 import { privateWorktreeIdentityEvidence } from './observation-publication.js';
 
 const OPERATION_TIMEOUT_MILLISECONDS = 30_000;
@@ -111,6 +112,15 @@ export interface FileNativeTarget {
   readonly absolutePath: string | null;
   readonly canOpen: boolean;
   readonly relativePath: string;
+  readonly provenance: WorktreeProvenance;
+  readonly worktreePath: string;
+}
+
+export interface WorktreeNativeTarget {
+  readonly absolutePath: string;
+  readonly branchOrSha: string;
+  readonly canLaunch: boolean;
+  readonly provenance: WorktreeProvenance;
   readonly worktreePath: string;
 }
 
@@ -1249,6 +1259,7 @@ export function createRepositorySession(
             absolutePath: null,
             canOpen: false,
             relativePath: escapedBytePath(change.pathBytes),
+            provenance: worktree.provenance,
             worktreePath: worktree.canonicalPath,
           };
         }
@@ -1261,6 +1272,7 @@ export function createRepositorySession(
             absolutePath,
             canOpen: change.workingFilePresent,
             relativePath,
+            provenance: worktree.provenance,
             worktreePath: worktree.canonicalPath,
           };
         }
@@ -1274,15 +1286,21 @@ export function createRepositorySession(
       const worktree = result.repository.worktrees.find(
         (candidate) => candidate.nativeTargetId === targetId,
       );
-      if (
-        worktree === undefined ||
-        worktree.canonicalPath === null ||
-        worktree.availability.kind !== 'available' ||
-        worktree.freshness.kind !== 'fresh'
-      ) {
-        throw new RepositoryTargetFailure();
-      }
-      return { worktreePath: worktree.canonicalPath };
+      if (worktree === undefined) throw new RepositoryTargetFailure();
+      const branchOrSha =
+        worktree.head.kind === 'local_branch'
+          ? worktree.head.displayName
+          : worktree.head.objectId;
+      const worktreePath = worktree.canonicalPath ?? worktree.displayPath;
+      return {
+        absolutePath: worktreePath,
+        branchOrSha,
+        canLaunch:
+          worktree.canonicalPath !== null &&
+          worktree.availability.kind === 'available',
+        provenance: worktree.provenance,
+        worktreePath,
+      };
     },
     async searchBranches(request) {
       const observed = await observe(() => delegate.requestRefresh());

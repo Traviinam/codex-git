@@ -133,6 +133,10 @@ class ManagedDedicatedConnection implements HostConnection {
     return this.context;
   }
 
+  capabilities() {
+    return { openCodexContext: true, openFileInCodex: false } as const;
+  }
+
   contexts(): AsyncIterable<HostContext> {
     return this.contextStream.read(this.context);
   }

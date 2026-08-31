@@ -65,6 +65,7 @@ describe('protocol HTTP dispatch', () => {
             kind: 'unavailable',
             reason: 'token=fixture-unavailable-secret',
           },
+          provenance: { kind: 'unclassified' },
           upstream: {
             kind: 'not-applicable',
             reason: 'The branch has no configured Upstream.',
@@ -839,6 +840,7 @@ function nativeSnapshot(
         head: { kind: 'initial' },
         indexTree: null,
         status: { kind: 'clean' },
+        provenance: { kind: 'unclassified' },
         upstream: {
           kind: 'not-applicable',
           reason: 'The branch has no configured Upstream.',
