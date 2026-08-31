@@ -1,10 +1,12 @@
 import type {
   DiffResult,
+  CommitDraft,
   FileId,
   NativeActionRequest,
   NativeActionResult,
   BranchSearchResult,
   OperationResult,
+  OperationId,
   RefId,
   RemoteId,
   RepositorySnapshot,
@@ -113,6 +115,27 @@ export interface RepositoryOverviewSource {
     readonly expectedWorktreeRevision: number;
     readonly fileIds: readonly FileId[];
   }): Promise<OperationResult>;
+  getCommitDraft(
+    worktreeId: ProtocolWorktree['worktreeId'],
+  ): Promise<CommitDraft>;
+  updateCommitDraft(request: {
+    readonly worktreeId: ProtocolWorktree['worktreeId'];
+    readonly expectedRevision: number;
+    readonly update:
+      | { readonly kind: 'set'; readonly text: string }
+      | { readonly kind: 'clear' };
+  }): Promise<CommitDraft>;
+  commit(
+    request: {
+      readonly worktreeId: ProtocolWorktree['worktreeId'];
+      readonly expectedWorktreeRevision: number;
+      readonly draftRevision: number;
+      readonly confirmDetachedHead: boolean;
+    },
+    onAccepted?: (operationId: OperationId) => void,
+  ): Promise<OperationResult>;
+  cancelOperation(operationId: OperationId): Promise<OperationResult>;
+  recoverOperation(operationId: OperationId): Promise<OperationResult>;
   searchBranches(
     worktreeId: ProtocolWorktree['worktreeId'],
     query: string,

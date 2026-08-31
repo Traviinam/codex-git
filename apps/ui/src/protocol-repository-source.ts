@@ -9,6 +9,8 @@ import {
   diffResultSchema,
   nativeActionResultSchema,
   branchSearchResultSchema,
+  commitDraftSchema,
+  commitDraftUpdateSchema,
   repositorySnapshotResultSchema,
   sessionMetadataSchema,
   sseInvalidationSchema,
@@ -51,6 +53,7 @@ export function createProtocolRepositorySource(
   let refresh: Promise<void> | undefined;
   let snapshotInvalidated = false;
   let commandsAvailable = false;
+  let commitDraftsAvailable = false;
   let operationRecoveryAvailable = false;
   let latestFetchResult:
     import('@codex-git/protocol').OperationResult | undefined;
@@ -111,6 +114,7 @@ export function createProtocolRepositorySource(
     .then((metadata) => {
       if (!active) return;
       commandsAvailable = metadata.capabilities.commands;
+      commitDraftsAvailable = metadata.capabilities.commitDrafts;
       operationRecoveryAvailable = metadata.capabilities.operationRecovery;
       if (metadata.capabilities.events) {
         events = createEventSource(endpointUrl(options.sessionUrl, 'events'));
@@ -254,6 +258,66 @@ export function createProtocolRepositorySource(
       );
       await requestSnapshot();
       return result;
+    },
+    async getCommitDraft(worktreeId) {
+      if (!commitDraftsAvailable) {
+        throw new Error('Commit Drafts are unavailable.');
+      }
+      return requestCommitDraft(fetcher, options.sessionUrl, {
+        kind: 'get',
+        worktreeId,
+      });
+    },
+    async updateCommitDraft(request) {
+      if (!commitDraftsAvailable) {
+        throw new Error('Commit Drafts are unavailable.');
+      }
+      return requestCommitDraft(fetcher, options.sessionUrl, request);
+    },
+    async commit(request, onAccepted) {
+      const command = { kind: 'commit', ...request } satisfies ProductCommand;
+      const receipt = await submitCommand(
+        fetcher,
+        options.sessionUrl,
+        commandEnvelopeSchema.parse({
+          clientCommandId: createClientCommandId(),
+          command,
+        }),
+      );
+      onAccepted?.(receipt.operationId);
+      if (!operationRecoveryAvailable) {
+        throw new Error('Commit recovery is unavailable.');
+      }
+      const result = await recoverOperation(
+        fetcher,
+        options.sessionUrl,
+        receipt.operationId,
+      );
+      await requestSnapshot();
+      return result;
+    },
+    async recoverOperation(operationId) {
+      if (!operationRecoveryAvailable) {
+        throw new Error('Operation recovery is unavailable.');
+      }
+      const result = await recoverOperation(
+        fetcher,
+        options.sessionUrl,
+        operationId,
+      );
+      await requestSnapshot();
+      return result;
+    },
+    async cancelOperation(operationId) {
+      const receipt = await submitCommand(
+        fetcher,
+        options.sessionUrl,
+        commandEnvelopeSchema.parse({
+          clientCommandId: createClientCommandId(),
+          command: { kind: 'cancel_operation', operationId },
+        }),
+      );
+      return recoverOperation(fetcher, options.sessionUrl, receipt.operationId);
     },
     async searchBranches(worktreeId, query) {
       const response = await protocolPost(
@@ -412,6 +476,25 @@ async function recoverOperation(
   return operationResultSchema.parse(await response.json());
 }
 
+async function requestCommitDraft(
+  fetcher: typeof fetch,
+  sessionUrl: string,
+  request: unknown,
+) {
+  const payload = commitDraftUpdateSchema.parse(request);
+  const response = await protocolFetch(
+    fetcher,
+    endpointUrl(sessionUrl, 'draft'),
+    {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!response.ok) throw new Error('Commit Draft request failed.');
+  return commitDraftSchema.parse(await response.json());
+}
+
 function protocolFetch(
   fetcher: typeof fetch,
   url: string,
@@ -443,6 +526,7 @@ function endpointUrl(
     | 'branches'
     | 'commands'
     | 'diff'
+    | 'draft'
     | 'events'
     | 'native-actions'
     | 'operations'

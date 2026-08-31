@@ -132,6 +132,7 @@ interface CanonicalRegistration {
 
 export interface RepositoryEngineOptions {
   readonly metadata?: CodexMetadataAdapter;
+  readonly operationTimeoutMilliseconds?: number;
 }
 
 export function createRepositoryEngine(
@@ -258,6 +259,7 @@ export function createRepositoryEngine(
           inspectFileMutationTargets: createFileMutationInspector(runGit),
           runGit,
           executeRemoteOperation,
+          operationTimeoutMilliseconds: options.operationTimeoutMilliseconds,
         }),
       );
     },
@@ -768,6 +770,7 @@ function runGit(
   signal?: AbortSignal,
   maximumOutputBytes?: number,
   input?: Uint8Array,
+  environment?: Readonly<Record<string, string>>,
 ): Promise<Uint8Array> {
   return new Promise((resolvePromise, reject) => {
     const child = execFile(
@@ -775,7 +778,7 @@ function runGit(
       [...args],
       {
         encoding: 'buffer',
-        env: createGitEnvironment(),
+        env: { ...createGitEnvironment(), ...environment },
         maxBuffer:
           maximumOutputBytes ??
           (allowLargeOutput ? GIT_OUTPUT_LIMIT_BYTES : 64 * 1_024),
@@ -783,7 +786,7 @@ function runGit(
         timeout: GIT_TIMEOUT_MILLISECONDS,
         windowsHide: true,
       },
-      (error, stdout) => {
+      (error, stdout, stderr) => {
         if (error !== null && error.code === acceptedEmptyExitCode) {
           resolvePromise(stdout);
           return;
@@ -795,6 +798,7 @@ function runGit(
               error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
                 ? 'output_too_large'
                 : 'command_failed',
+              classifyGitFailure(stderr),
             ),
           );
           return;
@@ -859,10 +863,33 @@ class GitCommandError extends Error {
   constructor(
     readonly exitCode: number | null,
     readonly failure: 'command_failed' | 'output_too_large',
+    readonly gitFailureCode:
+      'hook_rejected' | 'signing_failed' | 'unclassified',
   ) {
     super('The Git process did not produce a valid local observation.');
     this.name = 'GitCommandError';
   }
+}
+
+function classifyGitFailure(
+  stderr: string | Buffer,
+): 'hook_rejected' | 'signing_failed' | 'unclassified' {
+  const diagnostic = Buffer.isBuffer(stderr) ? stderr.toString('utf8') : stderr;
+  if (
+    /gpg failed to sign|failed to sign the data|signing failed/iu.test(
+      diagnostic,
+    )
+  ) {
+    return 'signing_failed';
+  }
+  if (
+    /hook declined|hook failed|pre-commit|commit-msg|prepare-commit-msg/iu.test(
+      diagnostic,
+    )
+  ) {
+    return 'hook_rejected';
+  }
+  return 'unclassified';
 }
 
 class WorktreeRegistrationMismatchError extends Error {}

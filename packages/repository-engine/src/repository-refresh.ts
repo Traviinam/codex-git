@@ -217,6 +217,7 @@ export function createRefreshingRepositorySession(
     resolveWorktreeNativeTarget: (targetId) =>
       delegate.resolveWorktreeNativeTarget(targetId),
     searchBranches: (request) => delegate.searchBranches(request),
+    updateDraft: (request) => delegate.updateDraft(request),
     dispatch,
     cancelOperation: (operationId) => delegate.cancelOperation(operationId),
     recoverOperation: (operationId) => delegate.recoverOperation(operationId),

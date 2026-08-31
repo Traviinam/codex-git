@@ -770,6 +770,234 @@ describe('Repository overview interactions', () => {
     root = createRoot(container);
   });
 
+  it('shows the exact Commit target and submits a synchronized multiline draft', async () => {
+    const fixture = createOverviewFixture('changed-worktree');
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository') throw new Error('Expected Repository');
+    const worktree = current.snapshot.worktrees[0]!;
+    const updateCommitDraft = vi.fn(
+      async (
+        request: Parameters<typeof fixture.source.updateCommitDraft>[0],
+      ) => ({
+        worktreeId: request.worktreeId,
+        revision: request.expectedRevision + 1,
+        text: request.update.kind === 'set' ? request.update.text : '',
+      }),
+    );
+    const commit = vi.fn(async () => ({
+      kind: 'succeeded' as const,
+      operationId: operationIdSchema.parse(
+        'operation_00000000000000000000000000000003',
+      ),
+      result: {
+        kind: 'commit' as const,
+        shortObjectId: 'abcdef1',
+        summary: 'Commit title',
+      },
+    }));
+    const store = createRepositoryStore({
+      ...fixture.source,
+      updateCommitDraft,
+      commit,
+    });
+    act(() => root.render(<App store={store} />));
+
+    expect(container.textContent).toContain(worktree.path);
+    expect(container.textContent).toContain('Local Branch main');
+    expect(container.textContent).toContain('1 staged change');
+    const submit = button('Commit staged changes in codex-git');
+    expect(submit.disabled).toBe(true);
+    const draft = container.querySelector('textarea');
+    if (!(draft instanceof HTMLTextAreaElement)) {
+      throw new Error('Missing Commit Draft');
+    }
+    setInput(draft, 'Commit title\n\nCommit body');
+    expect(submit.disabled).toBe(false);
+
+    await act(async () => submit.click());
+
+    expect(updateCommitDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        worktreeId: worktree.worktreeId,
+        update: { kind: 'set', text: 'Commit title\n\nCommit body' },
+      }),
+    );
+    expect(commit).toHaveBeenCalledWith(
+      {
+        worktreeId: worktree.worktreeId,
+        expectedWorktreeRevision: worktree.worktreeRevision,
+        draftRevision: 1,
+        confirmDetachedHead: false,
+      },
+      expect.any(Function),
+    );
+    expect(draft.value).toBe('');
+    expect(container.textContent).toContain('Committed abcdef1: Commit title');
+  });
+
+  it('explicitly clears only the selected Worktree Commit Draft', async () => {
+    const fixture = createOverviewFixture('many-worktrees');
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository') throw new Error('Expected Repository');
+    const main = current.snapshot.worktrees.find(({ role }) => role === 'main');
+    const linked = current.snapshot.worktrees.find(
+      ({ role }) => role === 'linked',
+    );
+    if (main === undefined || linked === undefined) {
+      throw new Error('Expected Main and Linked Worktrees');
+    }
+    const store = createRepositoryStore(fixture.source);
+    act(() => root.render(<App store={store} />));
+    const mainDraft = container.querySelector('textarea');
+    if (!(mainDraft instanceof HTMLTextAreaElement)) {
+      throw new Error('Missing Main Commit Draft');
+    }
+    setInput(mainDraft, 'Clear this draft');
+    act(() =>
+      button(`Select ${linked.displayName} Worktree at ${linked.path}`).click(),
+    );
+    const linkedDraft = container.querySelector('textarea');
+    if (!(linkedDraft instanceof HTMLTextAreaElement)) {
+      throw new Error('Missing Linked Commit Draft');
+    }
+    setInput(linkedDraft, 'Keep this draft');
+    act(() =>
+      button(`Select ${main.displayName} Worktree at ${main.path}`).click(),
+    );
+
+    act(() => button(`Clear Commit Draft for ${main.displayName}`).click());
+
+    expect(
+      (container.querySelector('textarea') as HTMLTextAreaElement).value,
+    ).toBe('');
+    act(() =>
+      button(`Select ${linked.displayName} Worktree at ${linked.path}`).click(),
+    );
+    expect(
+      (container.querySelector('textarea') as HTMLTextAreaElement).value,
+    ).toBe('Keep this draft');
+  });
+
+  it('does not reuse Detached HEAD confirmation across Worktrees at the same OID', () => {
+    const fixture = createOverviewFixture('many-worktrees');
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository') throw new Error('Expected Repository');
+    const main = current.snapshot.worktrees.find(({ role }) => role === 'main');
+    const linked = current.snapshot.worktrees.find(
+      ({ role }) => role === 'linked',
+    );
+    if (main === undefined || linked === undefined) {
+      throw new Error('Expected Main and Linked Worktrees');
+    }
+    const sharedObjectId = 'a'.repeat(40);
+    fixture.publish({
+      kind: 'repository',
+      snapshot: {
+        ...current.snapshot,
+        worktrees: current.snapshot.worktrees.map((worktree) =>
+          worktree.worktreeId === main.worktreeId ||
+          worktree.worktreeId === linked.worktreeId
+            ? {
+                ...worktree,
+                head: { kind: 'detached' as const, objectId: sharedObjectId },
+                status: {
+                  kind: 'changed' as const,
+                  conflictCount: 0,
+                  stagedCount: 1,
+                  trackedChangeCount: 0,
+                  untrackedCount: 0,
+                },
+              }
+            : worktree,
+        ),
+      },
+    });
+    const store = createRepositoryStore(fixture.source);
+    act(() => root.render(<App store={store} />));
+    const confirmation = container.querySelector('input[type="checkbox"]');
+    if (!(confirmation instanceof HTMLInputElement)) {
+      throw new Error('Missing Detached HEAD confirmation');
+    }
+
+    act(() => confirmation.click());
+    expect(confirmation.checked).toBe(true);
+    act(() =>
+      button(`Select ${linked.displayName} Worktree at ${linked.path}`).click(),
+    );
+
+    const linkedConfirmation = container.querySelector(
+      'input[type="checkbox"]',
+    );
+    expect(linkedConfirmation).toBeInstanceOf(HTMLInputElement);
+    expect((linkedConfirmation as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('allows a second Worktree Commit while the first Worktree Commit is running', async () => {
+    const fixture = createOverviewFixture('many-worktrees');
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository') throw new Error('Expected Repository');
+    const main = current.snapshot.worktrees.find(({ role }) => role === 'main');
+    const linked = current.snapshot.worktrees.find(
+      ({ role }) => role === 'linked',
+    );
+    if (main === undefined || linked === undefined) {
+      throw new Error('Expected Main and Linked Worktrees');
+    }
+    fixture.publish({
+      kind: 'repository',
+      snapshot: {
+        ...current.snapshot,
+        worktrees: current.snapshot.worktrees.map((worktree) => ({
+          ...worktree,
+          status: {
+            kind: 'changed' as const,
+            conflictCount: 0,
+            stagedCount: 1,
+            trackedChangeCount: 0,
+            untrackedCount: 0,
+          },
+        })),
+      },
+    });
+    const commit = vi.fn(
+      (request: Parameters<typeof fixture.source.commit>[0]) => {
+        void request;
+        return new Promise<never>(() => undefined);
+      },
+    );
+    const store = createRepositoryStore({ ...fixture.source, commit });
+    act(() => root.render(<App store={store} />));
+    const mainDraft = container.querySelector('textarea');
+    if (!(mainDraft instanceof HTMLTextAreaElement)) {
+      throw new Error('Missing Main Commit Draft');
+    }
+    setInput(mainDraft, 'Main running Commit');
+    await act(async () =>
+      button(`Commit staged changes in ${main.displayName}`).click(),
+    );
+    await vi.waitFor(() => expect(commit).toHaveBeenCalledTimes(1));
+
+    act(() =>
+      button(`Select ${linked.displayName} Worktree at ${linked.path}`).click(),
+    );
+    const linkedDraft = container.querySelector('textarea');
+    if (!(linkedDraft instanceof HTMLTextAreaElement)) {
+      throw new Error('Missing Linked Commit Draft');
+    }
+    setInput(linkedDraft, 'Linked concurrent Commit');
+    const linkedSubmit = button(
+      `Commit staged changes in ${linked.displayName}`,
+    );
+    expect(linkedSubmit.disabled).toBe(false);
+    await act(async () => linkedSubmit.click());
+
+    await vi.waitFor(() => expect(commit).toHaveBeenCalledTimes(2));
+    expect(commit.mock.calls.map(([request]) => request.worktreeId)).toEqual([
+      main.worktreeId,
+      linked.worktreeId,
+    ]);
+  });
+
   function button(accessibleName: string): HTMLButtonElement {
     const element = container.querySelector(
       `button[aria-label="${accessibleName}"]`,

@@ -453,6 +453,106 @@ describe('ProtocolRepositorySource', () => {
     });
     expect(result).toEqual(remoteResult);
   });
+
+  it('sends an explicit cancellation request for an accepted Operation', async () => {
+    const operationId = 'operation_0123456789abcdef0123456789abcdef';
+    let commandBody: unknown;
+    const result = {
+      kind: 'unknown_outcome',
+      operationId,
+      code: 'reconciliation_incomplete',
+      message: 'Cancellation is reconciling.',
+      recoveryAvailable: true,
+    };
+    const source = createProtocolRepositorySource({
+      projectPath: '/projects/codex-git',
+      sessionUrl: 'http://127.0.0.1:4173/instance/fixture-token/v1/session',
+      createEventSource: () => new FakeEventSource(),
+      fetch: async (input, init) => {
+        const url = String(input);
+        if (url.endsWith('/session')) {
+          return jsonResponse({
+            ...sessionMetadata,
+            capabilities: {
+              ...sessionMetadata.capabilities,
+              operationRecovery: true,
+            },
+          });
+        }
+        if (url.endsWith('/commands')) {
+          commandBody = JSON.parse(String(init?.body));
+          return jsonResponse({
+            operationId,
+            clientCommandId: (commandBody as { clientCommandId: string })
+              .clientCommandId,
+            disposition: 'accepted',
+          });
+        }
+        if (url.endsWith('/operations')) return jsonResponse(result);
+        return jsonResponse(repositorySnapshot);
+      },
+    });
+    await until(() => source.getSnapshot().kind === 'repository');
+
+    await expect(
+      source.cancelOperation(
+        operationId as import('@codex-git/protocol').OperationId,
+      ),
+    ).resolves.toEqual(result);
+    expect(commandBody).toEqual({
+      clientCommandId: expect.stringMatching(/^command_[0-9a-f]{32}$/u),
+      command: { kind: 'cancel_operation', operationId },
+    });
+  });
+
+  it('refreshes the Repository snapshot after explicit Operation recovery', async () => {
+    const operationId = 'operation_0123456789abcdef0123456789abcdef';
+    let snapshotRequests = 0;
+    const source = createProtocolRepositorySource({
+      projectPath: '/projects/codex-git',
+      sessionUrl: 'http://127.0.0.1:4173/instance/fixture-token/v1/session',
+      createEventSource: () => new FakeEventSource(),
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.endsWith('/session')) {
+          return jsonResponse({
+            ...sessionMetadata,
+            capabilities: {
+              ...sessionMetadata.capabilities,
+              operationRecovery: true,
+            },
+          });
+        }
+        if (url.endsWith('/operations')) {
+          return jsonResponse({
+            kind: 'succeeded',
+            operationId,
+            result: {
+              kind: 'commit',
+              shortObjectId: '1234567',
+              summary: 'Recovered Commit',
+            },
+          });
+        }
+        snapshotRequests += 1;
+        return jsonResponse({
+          ...repositorySnapshot,
+          repositoryRevision: snapshotRequests,
+        });
+      },
+    });
+    await until(() => source.getSnapshot().kind === 'repository');
+
+    await source.recoverOperation(
+      operationId as import('@codex-git/protocol').OperationId,
+    );
+
+    expect(snapshotRequests).toBe(2);
+    const state = source.getSnapshot();
+    expect(
+      state.kind === 'repository' && state.snapshot.repositoryRevision,
+    ).toBe(2);
+  });
 });
 
 class FakeEventSource {

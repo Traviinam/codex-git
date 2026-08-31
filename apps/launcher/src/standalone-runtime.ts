@@ -91,6 +91,8 @@ export async function startStandaloneRuntime(
                 ),
               branchSearch: (request) =>
                 repositorySession!.searchBranches(request),
+              commitDrafts: (request) =>
+                repositorySession!.updateDraft(request),
               snapshot: async () => {
                 const result = await repositorySession!.requestRefresh();
                 return toProtocolRepositorySnapshot(
@@ -169,6 +171,10 @@ async function dispatchRepositoryCommand(
   request: CommandEnvelope,
 ): Promise<OperationReceipt> {
   if (
+    request.command.kind === 'stage' ||
+    request.command.kind === 'unstage' ||
+    request.command.kind === 'commit' ||
+    request.command.kind === 'cancel_operation' ||
     request.command.kind === 'switch_branch' ||
     request.command.kind === 'pull' ||
     request.command.kind === 'push' ||

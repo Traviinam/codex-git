@@ -40,6 +40,14 @@ export function RepositoryOverview({
     readonly worktreeId: string;
     readonly message: string;
   } | null>(null);
+  const [detachedCommitConfirmation, setDetachedCommitConfirmation] = useState({
+    key: '',
+    confirmed: false,
+  });
+  const detachedCommitConfirmationKey = selectedHeadKeyForConfirmation(state);
+  const detachedCommitConfirmed =
+    detachedCommitConfirmation.key === detachedCommitConfirmationKey &&
+    detachedCommitConfirmation.confirmed;
   const orderedWorktrees =
     state.source.kind === 'repository'
       ? [...state.source.snapshot.worktrees].sort(compareWorktrees)
@@ -123,6 +131,11 @@ export function RepositoryOverview({
   const selected = snapshot.worktrees.find(
     (worktree) => worktree.worktreeId === state.selectedWorktreeId,
   );
+  const selectedCommitOperation =
+    selected === undefined
+      ? ({ kind: 'idle' } as const)
+      : (state.commitOperations[selected.worktreeId] ??
+        ({ kind: 'idle' } as const));
   const selectedBranchName =
     selected?.head.kind === 'local_branch' ? selected.head.displayName : null;
   const selectedTerminalTarget = selected?.nativeTargets.find(({ actions }) =>
@@ -627,6 +640,92 @@ export function RepositoryOverview({
                 }
               />
             </label>
+            <section
+              aria-label={`Commit staged changes in ${selected.displayName}`}
+            >
+              <h3>Commit staged changes</h3>
+              <dl>
+                <div>
+                  <dt>Worktree</dt>
+                  <dd>{selected.path}</dd>
+                </div>
+                <div>
+                  <dt>HEAD</dt>
+                  <dd>{commitHeadLabel(selected)}</dd>
+                </div>
+                <div>
+                  <dt>Staged Changes</dt>
+                  <dd>{stagedCount(selected)}</dd>
+                </div>
+              </dl>
+              <button
+                aria-label={`Clear Commit Draft for ${selected.displayName}`}
+                type="button"
+                onClick={() => store.clearCommitDraft(selected.worktreeId)}
+              >
+                Clear Commit Draft
+              </button>
+              {selected.head.kind !== 'detached' ? null : (
+                <label role="alert">
+                  <input
+                    type="checkbox"
+                    checked={detachedCommitConfirmed}
+                    onChange={(event) =>
+                      setDetachedCommitConfirmation({
+                        key: detachedCommitConfirmationKey,
+                        confirmed: event.currentTarget.checked,
+                      })
+                    }
+                  />
+                  I understand this Commit will be created on Detached HEAD and
+                  may not be reachable from a Branch.
+                </label>
+              )}
+              <button
+                aria-label={`Commit staged changes in ${selected.displayName}`}
+                type="button"
+                disabled={
+                  !commitAllowed(
+                    selected,
+                    state.commitDrafts[selected.worktreeId] ?? '',
+                    selectedCommitOperation,
+                    detachedCommitConfirmed,
+                  )
+                }
+                onClick={() => store.commit(detachedCommitConfirmed)}
+              >
+                Commit {stagedCount(selected)} staged{' '}
+                {stagedCount(selected) === 1 ? 'change' : 'changes'}
+              </button>
+              {selectedCommitOperation.kind === 'idle' ? null : (
+                <p aria-live="polite" role="status">
+                  {commitOperationLabel(selectedCommitOperation)}
+                </p>
+              )}
+              {selectedCommitOperation.kind === 'running' &&
+              selectedCommitOperation.operationId !== null ? (
+                <button
+                  aria-label={`Cancel Commit in ${selected.displayName}`}
+                  disabled={selectedCommitOperation.cancellationRequested}
+                  type="button"
+                  onClick={() => store.cancelCommit(selected.worktreeId)}
+                >
+                  {selectedCommitOperation.cancellationRequested
+                    ? 'Cancelling Commit…'
+                    : 'Cancel Commit'}
+                </button>
+              ) : null}
+              {selectedCommitOperation.kind === 'result' &&
+              selectedCommitOperation.result.kind === 'unknown_outcome' ? (
+                <button
+                  aria-label={`Recover Commit outcome for ${selected.displayName}`}
+                  type="button"
+                  onClick={() => store.recoverCommit(selected.worktreeId)}
+                >
+                  Re-check Commit outcome
+                </button>
+              ) : null}
+            </section>
             <section>
               <h3>Change Groups</h3>
               <ChangeGroups
@@ -690,6 +789,69 @@ function branchSwitchAllowed(
         category === 'branch_switch' && phase !== 'terminal',
     )
   );
+}
+
+function stagedCount(worktree: WorktreeOverviewSnapshot): number {
+  return worktree.status.kind === 'changed' ? worktree.status.stagedCount : 0;
+}
+
+function commitHeadLabel(worktree: WorktreeOverviewSnapshot): string {
+  if (worktree.head.kind === 'initial') return 'Initial Repository State';
+  if (worktree.head.kind === 'detached') {
+    return `Detached HEAD at ${worktree.head.objectId.slice(0, 7)}`;
+  }
+  return `Local Branch ${worktree.head.displayName}`;
+}
+
+function commitAllowed(
+  worktree: WorktreeOverviewSnapshot,
+  draft: string,
+  state: import('./repository-store.js').CommitOperationState,
+  detachedConfirmed: boolean,
+): boolean {
+  return (
+    worktree.availability?.kind !== 'unavailable' &&
+    worktree.freshness.kind === 'current' &&
+    worktree.status.kind === 'changed' &&
+    worktree.status.conflictCount === 0 &&
+    worktree.status.stagedCount > 0 &&
+    draft.trim().length > 0 &&
+    state.kind !== 'running' &&
+    !(state.kind === 'result' && state.result.kind === 'unknown_outcome') &&
+    (worktree.head.kind !== 'detached' || detachedConfirmed)
+  );
+}
+
+function commitOperationLabel(
+  state: import('./repository-store.js').CommitOperationState,
+): string {
+  if (state.kind === 'idle') return '';
+  if (state.kind === 'running') {
+    return state.cancellationRequested
+      ? 'Cancelling Commit and reconciling Git state…'
+      : 'Creating Commit…';
+  }
+  if (state.kind === 'failed') return state.message;
+  if (
+    state.result.kind === 'succeeded' &&
+    state.result.result.kind === 'commit'
+  ) {
+    return `Committed ${state.result.result.shortObjectId}: ${state.result.result.summary}`;
+  }
+  return 'message' in state.result
+    ? state.result.message
+    : 'The Commit operation finished.';
+}
+
+function selectedHeadKeyForConfirmation(
+  state: import('./repository-store.js').RepositoryStoreSnapshot,
+): string {
+  if (state.source.kind !== 'repository') return '';
+  const selected = state.source.snapshot.worktrees.find(
+    ({ worktreeId }) => worktreeId === state.selectedWorktreeId,
+  );
+  if (selected?.head.kind !== 'detached') return selected?.head.kind ?? '';
+  return `${selected.worktreeId}:${selected.generation}:${selected.head.objectId}`;
 }
 
 function pullAllowed(

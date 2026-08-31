@@ -28,6 +28,7 @@ export const productCommandSchema = z.discriminatedUnion('kind', [
     kind: z.literal('commit'),
     ...worktreeCommandBase,
     draftRevision: revisionSchema,
+    confirmDetachedHead: z.boolean(),
   }),
   z.strictObject({
     kind: z.literal('switch_branch'),

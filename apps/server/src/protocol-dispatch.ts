@@ -218,10 +218,15 @@ export function createProtocolDispatcher(
         if (!request.ok) {
           return { status: 400, value: { error: request.error } };
         }
-        return commitDraftResponse(
-          request.value.worktreeId,
-          await handlers.commitDrafts(request.value),
-        );
+        try {
+          return commitDraftResponse(
+            request.value.worktreeId,
+            await handlers.commitDrafts(request.value),
+          );
+        } catch (error) {
+          if (isStaleTargetError(error)) return staleDraftTargetResponse();
+          throw error;
+        }
       }
       if (endpoint === 'commands' && handlers.commands !== undefined) {
         const input = parseJsonBody(body);
@@ -377,6 +382,18 @@ function staleDiffTargetResponse(): ProtocolDispatchResponse {
       error: {
         code: 'stale_target',
         message: 'The Changed File target is stale or unavailable.',
+      },
+    },
+  };
+}
+
+function staleDraftTargetResponse(): ProtocolDispatchResponse {
+  return {
+    status: 409,
+    value: {
+      error: {
+        code: 'stale_target',
+        message: 'The Commit Draft changed or its Worktree is unavailable.',
       },
     },
   };
