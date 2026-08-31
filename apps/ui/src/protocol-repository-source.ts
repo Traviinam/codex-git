@@ -234,6 +234,27 @@ export function createProtocolRepositorySource(
       if (!response.ok) throw new Error('Native action request failed.');
       return nativeActionResultSchema.parse(await response.json());
     },
+    async mutateFiles(request) {
+      const command = { ...request } satisfies ProductCommand;
+      const receipt = await submitCommand(
+        fetcher,
+        options.sessionUrl,
+        commandEnvelopeSchema.parse({
+          clientCommandId: createClientCommandId(),
+          command,
+        }),
+      );
+      if (!operationRecoveryAvailable) {
+        throw new Error('File mutation recovery is unavailable.');
+      }
+      const result = await recoverOperation(
+        fetcher,
+        options.sessionUrl,
+        receipt.operationId,
+      );
+      await requestSnapshot();
+      return result;
+    },
     async searchBranches(worktreeId, query) {
       const response = await protocolPost(
         fetcher,

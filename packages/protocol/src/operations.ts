@@ -52,7 +52,10 @@ export const operationRecoveryRequestSchema = z.strictObject({
 const operationFailureEffectSchema = z.strictObject({
   label: z.string().min(1).max(256),
   kind: z.literal('failed_known'),
-  code: operationFailureCodeSchema,
+  code: z.union([
+    operationFailureCodeSchema,
+    z.enum(['index_locked', 'precondition_failed', 'stale']),
+  ]),
   message: messageSchema,
 });
 

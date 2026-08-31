@@ -241,6 +241,7 @@ function fixtureWorktree(path: string, id: string): DiscoveredWorktree {
   return {
     worktreeId: `worktree_${id}` as DiscoveredWorktree['worktreeId'],
     generation: `generation_${id}` as DiscoveredWorktree['generation'],
+    privateIdentityEvidence: `identity-${id}`,
     displayPath: path,
     canonicalPath: path as DiscoveredWorktree['canonicalPath'],
     canonicalPathBytes: Buffer.from(path),

@@ -491,7 +491,31 @@ export function RepositoryOverview({
                 worktree={selected}
                 selectedFileId={state.selectedFileId}
                 onSelect={(fileId) => store.selectFile(fileId)}
+                onMutate={(kind, fileIds) => store.mutateFiles(kind, fileIds)}
               />
+              {state.fileMutationResult === null ? null : (
+                <section aria-live="polite" role="status">
+                  <h4>File operation result</h4>
+                  {'message' in state.fileMutationResult ? (
+                    <p>{state.fileMutationResult.message}</p>
+                  ) : (
+                    <p>Changed Files updated.</p>
+                  )}
+                  {'effects' in state.fileMutationResult &&
+                  state.fileMutationResult.effects !== undefined ? (
+                    <ul>
+                      {state.fileMutationResult.effects.map((effect) => (
+                        <li key={effect.label}>
+                          {effect.label} —{' '}
+                          {effect.kind === 'succeeded'
+                            ? 'Succeeded'
+                            : `Failed: ${effect.message}`}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </section>
+              )}
             </section>
             <section>
               <h3>Diff</h3>

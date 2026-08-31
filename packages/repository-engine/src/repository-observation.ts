@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { access } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { access, lstat, readlink } from 'node:fs/promises';
 
 import type {
   OpaqueIdAuthority,
@@ -21,6 +22,8 @@ import {
 import { decodeForDisplay } from './worktree-porcelain.js';
 
 const DEFAULT_GIT_READ_CONCURRENCY = 4;
+const CHANGE_FINGERPRINT_CONCURRENCY = 4;
+const WORKING_FILE_HASH_LIMIT_BYTES = 4 * 1_024 * 1_024;
 const MAX_COHERENCE_ATTEMPTS = 3;
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
 
@@ -68,6 +71,7 @@ interface ChangedFileObservationBase<
   readonly previousDisplayPath: string | null;
   readonly previousPathBytes: Uint8Array | null;
   readonly workingFilePresent: boolean;
+  readonly baselineFingerprint?: string;
 }
 
 export type InProgressGitOperation =
@@ -345,6 +349,12 @@ async function observeWorktree(
     const indexPath = decodeLine(indexPathOutput);
     const inProgressOperation =
       await detectInProgressOperation(operationPathsOutput);
+    const changes = await fingerprintChangedFiles(
+      worktree.canonicalPath,
+      observed.head,
+      indexOutput,
+      observed.changes,
+    );
     return {
       kind: 'fresh',
       worktreeId: worktree.worktreeId,
@@ -362,7 +372,7 @@ async function observeWorktree(
               ...observed.status,
               inProgressOperation,
             },
-      changes: observed.changes,
+      changes,
       upstream: resolveUpstream(observed.upstream, shared),
     };
   } catch (error) {
@@ -666,6 +676,184 @@ function changedFile<Kind extends ChangedFileObservation['kind']>(
     previousPathBytes: previousPathBytes?.slice() ?? null,
     workingFilePresent,
   } as Extract<ChangedFileObservation, { kind: Kind }>;
+}
+
+async function fingerprintChangedFiles(
+  worktreePath: string,
+  head: DiscoveredHead,
+  indexOutput: Uint8Array,
+  changes: readonly ChangedFileObservation[],
+): Promise<readonly ChangedFileObservation[]> {
+  return mapWithConcurrency(
+    changes,
+    CHANGE_FINGERPRINT_CONCURRENCY,
+    async (change) => {
+      const paths = [change.pathBytes, change.previousPathBytes].filter(
+        (path): path is Uint8Array => path !== null,
+      );
+      return withBaselineFingerprint(
+        { ...change },
+        await fingerprintChangedFileTarget(
+          worktreePath,
+          head.objectId,
+          change,
+          paths.map((path) => indexPathEvidence(indexOutput, path)),
+        ),
+      );
+    },
+  );
+}
+
+export async function fingerprintChangedFileTarget(
+  worktreePath: string,
+  headObjectId: string | null,
+  change: Pick<
+    ChangedFileObservation,
+    'kind' | 'pathBytes' | 'previousPathBytes'
+  >,
+  indexEvidence: readonly string[],
+): Promise<string> {
+  const paths = [change.pathBytes, change.previousPathBytes].filter(
+    (path): path is Uint8Array => path !== null,
+  );
+  const workingEvidence: string[] = [];
+  for (const path of paths) {
+    workingEvidence.push(await fingerprintWorkingPath(worktreePath, path));
+  }
+  return createHash('sha256')
+    .update(change.kind)
+    .update('\0')
+    .update(headObjectId ?? 'initial')
+    .update('\0')
+    .update(fingerprintIndexEvidence(indexEvidence))
+    .update('\0')
+    .update(workingEvidence.join('\0'))
+    .digest('hex');
+}
+
+async function fingerprintWorkingPath(
+  worktreePath: string,
+  relativePath: Uint8Array,
+): Promise<string> {
+  const path = Buffer.concat([
+    Buffer.from(worktreePath),
+    Buffer.from('/'),
+    Buffer.from(relativePath),
+  ]);
+  let identity = 'unresolved';
+  try {
+    const metadata = await lstat(path);
+    identity = `${metadata.dev}:${metadata.ino}:${metadata.birthtimeMs}:${metadata.mode}:${metadata.size}:${metadata.mtimeMs}:${metadata.ctimeMs}`;
+    if (metadata.isSymbolicLink()) {
+      try {
+        const target = await readlink(path, { encoding: 'buffer' });
+        return createHash('sha256')
+          .update(`symlink\0${identity}\0`)
+          .update(target)
+          .digest('hex');
+      } catch (error) {
+        return `symlink-unreadable:${identity}:${errorCode(error)}`;
+      }
+    }
+    if (metadata.isFile()) {
+      return fingerprintRegularFile(path, identity);
+    }
+    return `non-file:${identity}`;
+  } catch (error) {
+    if (isMissingPath(error)) return 'missing';
+    return `unreadable:${identity}:${errorCode(error)}`;
+  }
+}
+
+async function fingerprintRegularFile(
+  path: Buffer,
+  identity: string,
+): Promise<string> {
+  const hash = createHash('sha256').update(`file\0${identity}\0`);
+  let bytesRead = 0;
+  try {
+    for await (const value of createReadStream(path, {
+      highWaterMark: 64 * 1_024,
+    })) {
+      const chunk = Buffer.from(value);
+      const remaining = WORKING_FILE_HASH_LIMIT_BYTES - bytesRead;
+      if (remaining <= 0) break;
+      const accepted = chunk.subarray(0, remaining);
+      hash.update(accepted);
+      bytesRead += accepted.length;
+      if (accepted.length < chunk.length) break;
+    }
+    return hash.update(`\0sampled:${bytesRead}`).digest('hex');
+  } catch (error) {
+    return `file-unreadable:${identity}:${errorCode(error)}`;
+  }
+}
+
+function indexPathEvidence(indexOutput: Uint8Array, path: Uint8Array): string {
+  const entries: string[] = [];
+  for (const record of splitNul(indexOutput)) {
+    const tab = record.indexOf(0x09);
+    if (tab < 0) continue;
+    const recordPath = record.subarray(tab + 1);
+    if (!Buffer.from(path).equals(Buffer.from(recordPath))) continue;
+    const firstSpace = record.indexOf(0x20);
+    const secondSpace = record.indexOf(0x20, firstSpace + 1);
+    if (firstSpace < 0 || secondSpace < 0) continue;
+    entries.push(Buffer.from(record.subarray(firstSpace + 1, tab)).toString());
+  }
+  return entries.length === 0 ? 'missing' : entries.join(',');
+}
+
+function fingerprintIndexEvidence(evidence: readonly string[]): string {
+  const hash = createHash('sha256');
+  for (const value of evidence) hash.update(value).update('\0');
+  return hash.digest('hex');
+}
+
+async function mapWithConcurrency<Input, Output>(
+  values: readonly Input[],
+  concurrency: number,
+  map: (value: Input) => Promise<Output>,
+): Promise<readonly Output[]> {
+  const results = new Array<Output>(values.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+      while (next < values.length) {
+        const index = next;
+        next += 1;
+        results[index] = await map(values[index]!);
+      }
+    }),
+  );
+  return results;
+}
+
+function errorCode(error: unknown): string {
+  return error instanceof Error && 'code' in error
+    ? String(error.code)
+    : 'unknown';
+}
+
+function withBaselineFingerprint(
+  change: ChangedFileObservation,
+  baselineFingerprint: string,
+): ChangedFileObservation {
+  Object.defineProperty(change, 'baselineFingerprint', {
+    configurable: false,
+    enumerable: false,
+    value: baselineFingerprint,
+    writable: false,
+  });
+  return change;
+}
+
+function isMissingPath(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+  );
 }
 
 function pathAfterFields(
