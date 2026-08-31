@@ -28,6 +28,7 @@ export class CodexHostConnection implements HostConnection {
     (context: HostContext) => void
   >();
   private readonly gitEntry: HTMLButtonElement;
+  private readonly gitEntryHost: HTMLElement | null;
   private frameGeneration = 0;
   private readonly mainSurface: HTMLElement;
   private mountedSurface: HTMLElement | null = null;
@@ -43,7 +44,7 @@ export class CodexHostConnection implements HostConnection {
     private readonly createSecret: () => string,
     private readonly onClose: () => void,
   ) {
-    const { document, window } = renderer;
+    const { document } = renderer;
     this.sidebar = anchors.sidebar;
     this.mainSurface = anchors.mainSurface;
     this.originalMainHidden = anchors.mainSurface.hidden;
@@ -62,9 +63,17 @@ export class CodexHostConnection implements HostConnection {
     this.gitEntry.type = 'button';
     this.gitEntry.textContent = 'Git';
     this.gitEntry.setAttribute('aria-label', 'Open Codex Git');
-    const nativeEntry = anchors.sidebar.querySelector('button');
-    if (nativeEntry instanceof window.HTMLButtonElement) {
-      this.gitEntry.className = nativeEntry.className;
+    this.gitEntry.className = anchors.nativeEntry.className;
+    this.gitEntryHost =
+      anchors.entryInsertionAnchor === null
+        ? null
+        : document.createElement(
+            anchors.entryInsertionAnchor.tagName.toLowerCase(),
+          );
+    if (this.gitEntryHost !== null && anchors.entryInsertionAnchor !== null) {
+      this.gitEntryHost.dataset.codexGitSidebarEntryHost = '';
+      this.gitEntryHost.className = anchors.entryInsertionAnchor.className;
+      this.gitEntryHost.append(this.gitEntry);
     }
     try {
       this.unsubscribeContext = renderer.subscribeContext(this.handleContext);
@@ -75,7 +84,11 @@ export class CodexHostConnection implements HostConnection {
         true,
       );
       renderer.window.addEventListener('message', this.handleFrameMessage);
-      this.sidebar.append(this.gitEntry);
+      if (this.gitEntryHost !== null && anchors.entryInsertionAnchor !== null) {
+        anchors.entryInsertionAnchor.before(this.gitEntryHost);
+      } else {
+        this.sidebar.append(this.gitEntry);
+      }
     } catch (error) {
       this.unsubscribeContext();
       this.gitEntry.removeEventListener('click', this.openGitSurface);
@@ -85,7 +98,7 @@ export class CodexHostConnection implements HostConnection {
         true,
       );
       renderer.window.removeEventListener('message', this.handleFrameMessage);
-      this.gitEntry.remove();
+      (this.gitEntryHost ?? this.gitEntry).remove();
       throw error;
     }
   }
@@ -178,7 +191,7 @@ export class CodexHostConnection implements HostConnection {
         'message',
         this.handleFrameMessage,
       );
-      this.gitEntry.remove();
+      (this.gitEntryHost ?? this.gitEntry).remove();
       this.removeMountedSurface();
       this.mainSurface.hidden = this.originalMainHidden;
     }

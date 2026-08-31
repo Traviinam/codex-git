@@ -33,10 +33,10 @@ endpoint, or record it in ordinary logs.
 
 ## Tested profile
 
-| Codex Desktop                 | Chromium framework | Required anchors                                                   | Evidence                                                                                                                                                       |
-| ----------------------------- | ------------------ | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `26.820.60940` (build `7119`) | `151.0.7922.170`   | `#app-shell-sidebar`; `[data-app-shell-main-surface="default"]`    | Installed renderer bundle inspection plus automated DOM fixture coverage                                                                                       |
-| `26.818.41509` (build `6962`) | `151.0.7922.170`   | `.app-shell-left-panel`; `[data-app-shell-main-surface="default"]` | App bundle SHA-256 `8eb91bd9efbf9a4dd04b9b0afdbfcb4e0bab5da18c1919ad74ca327c00c7e791`; live isolated CDP attachment/teardown; automated exact-profile fixtures |
+| Codex Desktop                 | Chromium framework | Required anchors                                                                                                           | Evidence                                                                                                                                                                        |
+| ----------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `26.820.60940` (build `7119`) | `151.0.7922.170`   | `#app-shell-sidebar`; `[data-app-shell-main-surface="default"]`                                                            | Installed renderer bundle inspection plus automated DOM fixture coverage                                                                                                        |
+| `26.818.41509` (build `6962`) | `151.0.7922.170`   | `.app-shell-left-panel`; selected Project section; `button.sidebar-item.w-full`; `[data-app-shell-main-surface="default"]` | App bundle SHA-256 `8eb91bd9efbf9a4dd04b9b0afdbfcb4e0bab5da18c1919ad74ca327c00c7e791`; live isolated visible-entry/attachment/teardown probes; automated exact-profile fixtures |
 
 The automated exact-profile matrix covers read-only probing, fail-closed fallback,
 transactional attachment, one-entry mounting, native navigation, repeat

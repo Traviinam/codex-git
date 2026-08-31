@@ -1,3 +1,4 @@
+import { JSDOM } from 'jsdom';
 import { describe, expect, it } from 'vitest';
 
 import type { HostContext } from '@codex-git/host-adapter';
@@ -134,7 +135,67 @@ describe('dedicated Codex remote renderer', () => {
     ).rejects.toThrow('Unsupported Codex Desktop version');
     expect(session.commands).toEqual([]);
   });
+
+  it('mounts build 6962 inside a full-width navigation section', async () => {
+    const dom = build6962Dom();
+    const session = new FixtureCdpSession(
+      { status: 'not-ready' },
+      'Chrome/151.0.7922.170',
+      dom,
+    );
+
+    const connection = await connectDedicatedCodexRenderer(
+      { ...request, build: '6962', version: '26.818.41509' },
+      {
+        connect: async () => session,
+        createBindingName: () => '__codexGitNotify_fixture',
+      },
+    );
+
+    const entry = dom.window.document.querySelector(
+      '[data-codex-git-sidebar-entry]',
+    );
+    const projects = dom.window.document.querySelector(
+      'section:has([data-app-action-sidebar-section-toggle])',
+    );
+    expect(entry?.classList.contains('sidebar-item')).toBe(true);
+    expect(entry?.parentElement?.tagName).toBe('SECTION');
+    expect(entry?.parentElement?.nextElementSibling).toBe(projects);
+
+    await connection.close();
+    expect(
+      dom.window.document.querySelector('[data-codex-git-sidebar-entry]'),
+    ).toBeNull();
+  });
 });
+
+function build6962Dom(): JSDOM {
+  return new JSDOM(
+    `<aside class="app-shell-left-panel">
+      <div>
+        <nav>
+          <button type="button" class="mode-switch">Codex</button>
+          <div>
+            <button type="button" class="sidebar-item flex w-full">Sites</button>
+          </div>
+          <div>
+            <section class="relative px-row-x">
+              <button type="button" data-app-action-sidebar-section-toggle>Projects</button>
+              <div
+                aria-current="page"
+                data-app-action-sidebar-project-id="project-42"
+                data-app-action-sidebar-project-label="codex-git"
+                data-app-action-sidebar-project-row
+              ></div>
+            </section>
+          </div>
+        </nav>
+      </div>
+    </aside>
+    <main data-app-shell-main-surface="default">Native task</main>`,
+    { runScripts: 'outside-only', url: 'app://-/index.html' },
+  );
+}
 
 const expectedContext = {
   projectPath: '/Users/example/codex-git',
@@ -172,6 +233,7 @@ class FixtureCdpSession implements CdpSession {
   constructor(
     private readonly installation: unknown | unknown[],
     private readonly product = 'Chrome/151.0.7922.170',
+    private readonly dom?: JSDOM,
   ) {}
 
   async send(method: string, params?: unknown): Promise<unknown> {
@@ -180,6 +242,24 @@ class FixtureCdpSession implements CdpSession {
       return { product: this.product };
     }
     if (method === 'Runtime.evaluate') {
+      if (this.dom !== undefined) {
+        const expression = isRecord(params) ? params.expression : null;
+        if (typeof expression !== 'string') {
+          throw new Error('Expected a Runtime.evaluate expression');
+        }
+        try {
+          return { result: { value: this.dom.window.eval(expression) } };
+        } catch (error) {
+          return {
+            exceptionDetails: {
+              exception: {
+                description:
+                  error instanceof Error ? error.message : String(error),
+              },
+            },
+          };
+        }
+      }
       const value = Array.isArray(this.installation)
         ? this.installation.shift()
         : this.installation;
@@ -200,4 +280,8 @@ class FixtureCdpSession implements CdpSession {
   async close(): Promise<void> {
     this.closed = true;
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }

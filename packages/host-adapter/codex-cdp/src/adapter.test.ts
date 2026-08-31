@@ -95,14 +95,7 @@ describe('CodexCdpHostAdapter', () => {
   });
 
   it('uses the tested left-panel anchor for Codex Desktop build 6962', async () => {
-    const dom = new JSDOM(`
-      <div id="root">
-        <aside class="app-shell-left-panel">
-          <button data-native-entry type="button">Tasks</button>
-        </aside>
-        <main data-app-shell-main-surface="default">Native task</main>
-      </div>
-    `);
+    const dom = build6962CompatibleDom();
 
     const result = await new CodexCdpHostAdapter({
       rendererSource: new FixtureRendererSource(
@@ -114,21 +107,24 @@ describe('CodexCdpHostAdapter', () => {
     });
 
     expect(result.kind).toBe('attached');
-    expect(
-      dom.window.document.querySelectorAll('[data-codex-git-sidebar-entry]'),
-    ).toHaveLength(1);
+    const entry = dom.window.document.querySelector(
+      '[data-codex-git-sidebar-entry]',
+    );
+    expect(entry?.classList.contains('w-full')).toBe(true);
+    expect(entry?.parentElement?.tagName).toBe('SECTION');
+    expect(entry?.parentElement?.nextElementSibling).toBe(
+      dom.window.document.querySelector(
+        'section:has([data-app-action-sidebar-project-row][aria-current="page"])',
+      ),
+    );
     if (result.kind === 'attached') await result.connection.close();
+    expect(
+      dom.window.document.querySelector('[data-codex-git-sidebar-entry-host]'),
+    ).toBeNull();
   });
 
   it('rejects a version and build from different tested profiles', async () => {
-    const dom = new JSDOM(`
-      <div id="root">
-        <aside class="app-shell-left-panel">
-          <button data-native-entry type="button">Tasks</button>
-        </aside>
-        <main data-app-shell-main-surface="default">Native task</main>
-      </div>
-    `);
+    const dom = build6962CompatibleDom();
 
     const result = await new CodexCdpHostAdapter({
       rendererSource: new FixtureRendererSource(
@@ -463,6 +459,21 @@ function compatibleDom(): JSDOM {
     <div id="root">
       <aside id="app-shell-sidebar">
         <button data-native-entry type="button">Tasks</button>
+      </aside>
+      <main data-app-shell-main-surface="default">Native task</main>
+    </div>
+  `);
+}
+
+function build6962CompatibleDom(): JSDOM {
+  return new JSDOM(`
+    <div id="root">
+      <aside class="app-shell-left-panel">
+        <button class="sidebar-item w-full" data-native-entry type="button">Tasks</button>
+        <section class="relative px-row-x">
+          <button data-app-action-sidebar-section-toggle type="button">Projects</button>
+          <div aria-current="page" data-app-action-sidebar-project-row></div>
+        </section>
       </aside>
       <main data-app-shell-main-surface="default">Native task</main>
     </div>

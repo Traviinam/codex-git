@@ -271,9 +271,11 @@ async function install(
 ): Promise<Installation> {
   const input: BridgeInput = {
     bindingName,
+    entryInsertionSelector: profile.entryInsertionSelector,
     expectedProject: request.expectedProject,
     generation,
     mainSurfaceSelector: profile.mainSurfaceSelector,
+    nativeEntrySelector: profile.nativeEntrySelector,
     openSurface: request.openSurface,
     projectPath: request.projectPath,
     surfaceTitle: request.surface.title,
@@ -418,9 +420,11 @@ function wait(milliseconds: number): Promise<void> {
 
 interface BridgeInput {
   readonly bindingName: string;
+  readonly entryInsertionSelector: string | null;
   readonly expectedProject: DedicatedProjectIdentity | null;
   readonly generation: number;
   readonly mainSurfaceSelector: string;
+  readonly nativeEntrySelector: string;
   readonly openSurface: boolean;
   readonly projectPath: string;
   readonly surfaceTitle: string;
@@ -438,9 +442,16 @@ function installDomBridge(input: BridgeInput): unknown {
   const sidebar = sidebars.item(0);
   const main = mainSurfaces.item(0);
   const selectedProject = document.querySelector('[data-app-action-sidebar-project-row][aria-current="page"]');
+  const nativeEntry = sidebar?.querySelector(input.nativeEntrySelector);
+  const entryInsertionAnchors = input.entryInsertionSelector === null ? null :
+    sidebar?.querySelectorAll(input.entryInsertionSelector);
+  const entryInsertionAnchor = entryInsertionAnchors?.item(0) ?? null;
   if (sidebars.length !== 1 || mainSurfaces.length !== 1 ||
       !(sidebar instanceof HTMLElement) || !(main instanceof HTMLElement) ||
-      !(selectedProject instanceof HTMLElement)) {
+      !(selectedProject instanceof HTMLElement) ||
+      !(nativeEntry instanceof HTMLButtonElement) ||
+      (entryInsertionAnchors !== null && (entryInsertionAnchors.length !== 1 ||
+        !(entryInsertionAnchor instanceof HTMLElement)))) {
     return { status: 'not-ready' };
   }
   const project = { id: selectedProject.dataset.appActionSidebarProjectId ?? '',
@@ -458,8 +469,14 @@ function installDomBridge(input: BridgeInput): unknown {
   const entry = document.createElement('button');
   entry.type = 'button'; entry.dataset.codexGitSidebarEntry = ''; entry.textContent = 'Git';
   entry.setAttribute('aria-label', 'Open Codex Git');
-  const nativeEntry = sidebar.querySelector('button');
-  if (nativeEntry instanceof HTMLButtonElement) entry.className = nativeEntry.className;
+  entry.className = nativeEntry.className;
+  const entryHost = entryInsertionAnchor === null ? null :
+    document.createElement(entryInsertionAnchor.tagName.toLowerCase());
+  if (entryHost !== null && entryInsertionAnchor !== null) {
+    entryHost.dataset.codexGitSidebarEntryHost = '';
+    entryHost.className = entryInsertionAnchor.className;
+    entryHost.append(entry);
+  }
   let host: HTMLElement | null = null;
   let frame: HTMLIFrameElement | null = null;
   let capability = '', challenge = '', lastContext = '';
@@ -526,7 +543,9 @@ function installDomBridge(input: BridgeInput): unknown {
   };
   const observer = new MutationObserver(() => {
     const currentProject = document.querySelector('[data-app-action-sidebar-project-row][aria-current="page"]');
-    if (!sidebar.isConnected || !main.isConnected || !(currentProject instanceof HTMLElement) ||
+    if (!sidebar.isConnected || !main.isConnected || !entry.isConnected ||
+        (entryHost !== null && !entryHost.isConnected) ||
+        !(currentProject instanceof HTMLElement) ||
         currentProject.dataset.appActionSidebarProjectId !== project.id ||
         currentProject.dataset.appActionSidebarProjectLabel !== project.label) {
       notify({ kind: 'standalone-required' });
@@ -536,14 +555,16 @@ function installDomBridge(input: BridgeInput): unknown {
   });
   const close = () => {
     observer.disconnect(); sidebar.removeEventListener('click', handleSidebar, true);
-    globalThis.removeEventListener('message', handleMessage); restore(); entry.remove();
+    globalThis.removeEventListener('message', handleMessage); restore();
+    (entryHost ?? entry).remove();
     delete root.__codexGitBridge;
   };
   root.__codexGitBridge = { close, restore };
   entry.addEventListener('click', open);
   sidebar.addEventListener('click', handleSidebar, true);
   globalThis.addEventListener('message', handleMessage);
-  sidebar.append(entry);
+  if (entryHost !== null && entryInsertionAnchor !== null) entryInsertionAnchor.before(entryHost);
+  else sidebar.append(entry);
   observer.observe(document.documentElement, { attributes: true, childList: true, subtree: true });
   if (input.openSurface) open();
   const initialContext = context();
