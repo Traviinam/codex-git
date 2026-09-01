@@ -48,13 +48,15 @@ exceeds its budget:
 | Visible external selected-Worktree change | 2,000 ms |
 | Loaded UI interaction                     |   100 ms |
 
-The macOS benchmark starts the production Vite surface and loopback protocol,
-then drives the real protocol source, Repository Store, React DOM, and SSE
-invalidation path. Shell timing includes loading the served surface entry and
-its first DOM commit. Selected-Worktree timing ends when the authoritative
-snapshot is visible. External-change timing starts before the filesystem write
-and ends only after SSE-triggered refresh makes the new Changed File visible in
-the DOM.
+The macOS benchmark takes the median of three independent disposable fixtures.
+Each sample starts the production Vite surface and loopback protocol, waits for
+Vite to finish preparing the served entry, then drives the real protocol source,
+Repository Store, React DOM, and SSE invalidation path. The preparation step is
+outside the product timing so dependency optimization cannot contend with the
+Node/JSDOM measurement. Shell timing includes the first DOM commit.
+Selected-Worktree timing ends when the authoritative snapshot is visible.
+External-change timing starts before the filesystem write and ends only after
+SSE-triggered refresh makes the new Changed File visible in the DOM.
 
 The approved CI reference profile is `github-actions-macos-15`, paired with the
 tested Codex compatibility profile `26.820.60940 (build 7119)`. The JSON and

@@ -31,6 +31,49 @@ export interface ReferenceBenchmarkResult {
 }
 
 export async function runReferenceBenchmark(): Promise<ReferenceBenchmarkResult> {
+  const samples: ReferenceBenchmarkResult[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    samples.push(await runReferenceBenchmarkSample());
+  }
+  return aggregateReferenceBenchmarkSamples(samples);
+}
+
+export function aggregateReferenceBenchmarkSamples(
+  samples: readonly ReferenceBenchmarkResult[],
+): ReferenceBenchmarkResult {
+  const first = samples[0];
+  if (first === undefined || samples.length % 2 === 0) {
+    throw new Error('Reference benchmark requires an odd number of samples.');
+  }
+  const fixture = JSON.stringify(first.fixture);
+  if (samples.some((sample) => JSON.stringify(sample.fixture) !== fixture)) {
+    throw new Error('Reference benchmark sample fixtures do not match.');
+  }
+  const measurementNames = [
+    'externalChange',
+    'fullSnapshot',
+    'loadedInteraction',
+    'selectedWorktree',
+    'shell',
+  ] as const;
+  const measurements = roundMeasurements(
+    Object.fromEntries(
+      measurementNames.map((name) => {
+        const values = samples
+          .map((sample) => sample.measurements[name])
+          .toSorted((left, right) => left - right);
+        return [name, values[Math.floor(values.length / 2)]];
+      }),
+    ) as unknown as PerformanceMeasurements,
+  );
+  return {
+    budgetFailures: evaluatePerformanceBudget(measurements),
+    fixture: first.fixture,
+    measurements,
+  };
+}
+
+async function runReferenceBenchmarkSample(): Promise<ReferenceBenchmarkResult> {
   const root = await mkdtemp(join(tmpdir(), 'codex-git-reference-'));
   const main = join(root, 'main');
   let session: Awaited<
