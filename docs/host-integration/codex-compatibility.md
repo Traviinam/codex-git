@@ -51,9 +51,11 @@ matrix; do not widen selectors to make an unknown build appear compatible.
 
 This matrix passed on 2026-08-29 against a disposable dedicated profile using
 Codex Desktop `26.820.60940` (build `7119`) and Chromium `151.0.7922.170`.
-Build `6962` is intentionally excluded: live validation showed its `app://`
-Content Security Policy blocks the loopback Git Surface frame even after the
-scoped CDP bypass command. Unsupported builds must use the standalone surface.
+Builds `6962` and `7377` are intentionally excluded: live validation showed
+their `app://` Content Security Policy blocks the loopback Git Surface frame
+even after the scoped CDP bypass command. Build `7377` also reports Chromium
+`151.0.7922.174`, outside the tested framework version. Unsupported builds must
+use the standalone surface.
 
 The human portion of the matrix is intentionally limited to behavior that
 requires an actual Codex/macOS session. The release wizard records these checks:
