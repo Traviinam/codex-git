@@ -127,7 +127,6 @@ describe('dedicated Codex remote renderer', () => {
     ).rejects.toThrow('Unsupported Codex Desktop version');
     expect(session.commands).toEqual([]);
   });
-
 });
 
 const expectedContext = {
