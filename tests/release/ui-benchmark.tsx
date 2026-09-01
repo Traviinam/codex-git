@@ -29,11 +29,8 @@ export async function measureProtocolReleaseUi(options: {
   readonly sessionUrl: URL;
   readonly surfaceUrl: URL;
 }): Promise<ProtocolReleaseUiMeasurements> {
+  await prepareProtocolReleaseSurface(options.surfaceUrl);
   const overallStartedAt = performance.now();
-  const surface = await (await fetch(options.surfaceUrl)).text();
-  if (!surface.includes('src="/src/main.tsx"')) {
-    throw new Error('The production Git Surface entry point was not served.');
-  }
 
   return withBrowserDom(async () => {
     (
@@ -131,6 +128,21 @@ export async function measureProtocolReleaseUi(options: {
       container.remove();
     }
   });
+}
+
+export async function prepareProtocolReleaseSurface(
+  surfaceUrl: URL,
+  fetcher: typeof fetch = fetch,
+): Promise<void> {
+  const surface = await (await fetcher(surfaceUrl)).text();
+  if (!surface.includes('src="/src/main.tsx"')) {
+    throw new Error('The production Git Surface entry point was not served.');
+  }
+  const entry = await fetcher(new URL('/src/main.tsx', surfaceUrl));
+  if (!entry.ok) {
+    throw new Error('The production Git Surface entry point did not load.');
+  }
+  await entry.arrayBuffer();
 }
 
 export async function measureReleaseUi(): Promise<ReleaseUiMeasurements> {
