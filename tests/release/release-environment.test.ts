@@ -1,7 +1,10 @@
+import { readFile } from 'node:fs/promises';
+
 import { describe, expect, it } from 'vitest';
 
 import {
   collectReleaseEnvironment,
+  SUPPORTED_CODEX_RELEASE_VERSION,
   validateReleaseEnvironment,
 } from './release-environment.js';
 
@@ -51,5 +54,13 @@ describe('release environment evidence', () => {
         referenceProfile: 'unapproved',
       }),
     ).toHaveLength(3);
+  });
+
+  it('keeps the macOS CI profile aligned with the supported Codex build', async () => {
+    const workflow = await readFile('.github/workflows/ci.yml', 'utf8');
+
+    expect(workflow).toContain(
+      `CODEX_DESKTOP_VERSION: ${SUPPORTED_CODEX_RELEASE_VERSION}`,
+    );
   });
 });
