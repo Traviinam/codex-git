@@ -1,5 +1,5 @@
 import { JSDOM } from 'jsdom';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { HostContext } from '@codex-git/host-adapter';
 
@@ -93,6 +93,98 @@ describe('dedicated Codex remote renderer', () => {
       ),
     ).rejects.toThrow('document loader');
     expect(session.commands).toEqual([]);
+  });
+
+  it('keeps the Git entry and connection when native navigation clears project selection', async () => {
+    const dom = new JSDOM(
+      `<aside id="app-shell-sidebar"><button>New chat</button><div data-app-action-sidebar-project-row aria-current="page" data-app-action-sidebar-project-id="project-42" data-app-action-sidebar-project-label="codex-git"></div><div data-app-action-sidebar-thread-row data-app-action-sidebar-thread-selected="true" data-app-action-sidebar-thread-id="task-42" data-app-action-sidebar-thread-title="Native task"></div></aside><main data-app-shell-main-surface="default"></main>`,
+      { runScripts: 'outside-only', url: 'https://codex.invalid' },
+    );
+    const session = new FixtureCdpSession({}, 'Chrome/151.0.7922.170', dom);
+    const binding = '__codexGitNotify_navigation';
+    Object.assign(dom.window, {
+      [binding]: (payload: string) =>
+        session.publish({
+          method: 'Runtime.bindingCalled',
+          params: { name: binding, payload },
+        }),
+    });
+    const connection = await connectDedicatedCodexRenderer(request, {
+      connect: async () => session,
+      createBindingName: () => binding,
+    });
+    const events: string[] = [];
+    connection.subscribe((event) => events.push(event.kind));
+    dom.window.document
+      .querySelector('[data-app-action-sidebar-project-row]')!
+      .removeAttribute('aria-current');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(events).not.toContain('standalone-required');
+    expect(
+      dom.window.document.querySelectorAll('[data-codex-git-sidebar-entry]'),
+    ).toHaveLength(1);
+    expect(connection.currentContext().task).toBeNull();
+    expect(connection.currentContext().projectPath).toBeNull();
+    expect(
+      await connection.perform({
+        kind: 'open-codex-context',
+        targetId: 'unproven',
+      }),
+    ).toEqual({ status: 'rejected' });
+    const contextsBefore = events.filter((kind) => kind === 'context').length;
+    session.publish({ method: 'Runtime.executionContextsCleared' });
+    await vi.waitFor(() =>
+      expect(
+        events.filter((kind) => kind === 'context').length,
+      ).toBeGreaterThan(contextsBefore),
+    );
+    expect(
+      dom.window.document.querySelectorAll('[data-codex-git-sidebar-entry]'),
+    ).toHaveLength(1);
+    const projectRow = dom.window.document.querySelector(
+      '[data-app-action-sidebar-project-row]',
+    )!;
+    const entry = dom.window.document.querySelector<HTMLButtonElement>(
+      '[data-codex-git-sidebar-entry]',
+    )!;
+    projectRow.setAttribute('aria-current', 'page');
+    projectRow.setAttribute(
+      'data-app-action-sidebar-project-id',
+      'another-project',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(entry.disabled).toBe(true);
+    expect(connection.currentContext().task).toBeNull();
+    projectRow.setAttribute('data-app-action-sidebar-project-id', 'project-42');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(entry.disabled).toBe(false);
+    expect(events).not.toContain('standalone-required');
+    await connection.close();
+    dom.window.close();
+  });
+
+  it('reports native cleanup failure after still releasing CSP', async () => {
+    const session = new FixtureCdpSession({
+      context: expectedContext,
+      project: { id: 'project-42', label: 'codex-git' },
+      status: 'attached',
+    });
+    const connection = await connectDedicatedCodexRenderer(request, {
+      connect: async () => session,
+    });
+    const send = session.send.bind(session);
+    session.send = async (method, params) => {
+      if (method === 'Runtime.evaluate')
+        return { exceptionDetails: { text: 'Native cleanup failed' } };
+      return send(method, params);
+    };
+    await expect(connection.close()).rejects.toThrow('native Codex surface');
+    expect(session.commands).toContainEqual({
+      method: 'Page.setBypassCSP',
+      params: { enabled: false },
+    });
+    session.send = send;
+    await connection.close();
   });
 
   it('rejects an unverified Chromium build before changing CSP', async () => {

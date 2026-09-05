@@ -161,6 +161,12 @@ class RemoteDedicatedRendererConnection implements DedicatedRendererConnection {
       return { status: 'rejected' };
     }
     if (
+      action.kind === 'open-codex-context' &&
+      this.context.projectPath !== this.request.projectPath
+    ) {
+      return { status: 'rejected' };
+    }
+    if (
       action.kind === 'restore-native-surface' ||
       action.kind === 'open-codex-context'
     ) {
@@ -281,13 +287,23 @@ class RemoteDedicatedRendererConnection implements DedicatedRendererConnection {
       this.listeners.clear();
       await this.refresh;
     }
-    await evaluate(this.session, 'globalThis.__codexGitBridge?.close()').catch(
-      () => undefined,
-    );
+    let nativeCleanupFailed: boolean;
+    try {
+      const response = await evaluate(
+        this.session,
+        'globalThis.__codexGitBridge?.close()',
+      );
+      nativeCleanupFailed =
+        isRecord(response) && response.exceptionDetails !== undefined;
+    } catch {
+      nativeCleanupFailed = true;
+    }
     if (this.cspLease !== null) {
       await this.cspLease.release();
       this.cspLease = null;
     }
+    if (nativeCleanupFailed)
+      throw new Error('The native Codex surface could not be restored');
     await this.session.close();
   }
 }
@@ -402,7 +418,10 @@ function parseProject(value: unknown): DedicatedProjectIdentity | null {
 }
 
 function parseHostContext(value: unknown): HostContext | null {
-  if (!isRecord(value) || typeof value.projectPath !== 'string') {
+  if (
+    !isRecord(value) ||
+    (value.projectPath !== null && typeof value.projectPath !== 'string')
+  ) {
     return null;
   }
   if (
@@ -474,20 +493,22 @@ function installDomBridge(input: BridgeInput): unknown {
   const sidebar = sidebars.item(0);
   const main = mainSurfaces.item(0);
   const selectedProject = document.querySelector('[data-app-action-sidebar-project-row][aria-current="page"]');
+  const boundRows = Array.from(document.querySelectorAll('[data-app-action-sidebar-project-row]')).filter((row) => row instanceof HTMLElement && row.dataset.appActionSidebarProjectId === input.expectedProject?.id && row.dataset.appActionSidebarProjectLabel === input.expectedProject?.label);
+  const verifiedProject = selectedProject ?? (input.expectedProject !== null && boundRows.length === 1 ? boundRows[0] : null);
   const nativeEntry = sidebar?.querySelector(input.nativeEntrySelector);
   const entryInsertionAnchors = input.entryInsertionSelector === null ? null :
     sidebar?.querySelectorAll(input.entryInsertionSelector);
   const entryInsertionAnchor = entryInsertionAnchors?.item(0) ?? null;
   if (sidebars.length !== 1 || mainSurfaces.length !== 1 ||
       !(sidebar instanceof HTMLElement) || !(main instanceof HTMLElement) ||
-      !(selectedProject instanceof HTMLElement) ||
+      !(verifiedProject instanceof HTMLElement) ||
       !(nativeEntry instanceof HTMLButtonElement) ||
       (entryInsertionAnchors !== null && (entryInsertionAnchors.length !== 1 ||
         !(entryInsertionAnchor instanceof HTMLElement)))) {
     return { status: 'not-ready' };
   }
-  const project = { id: selectedProject.dataset.appActionSidebarProjectId ?? '',
-    label: selectedProject.dataset.appActionSidebarProjectLabel ?? '' };
+  const project = { id: verifiedProject.dataset.appActionSidebarProjectId ?? '',
+    label: verifiedProject.dataset.appActionSidebarProjectLabel ?? '' };
   if (project.id.length === 0 || project.label.length === 0) return { status: 'incompatible' };
   if (input.expectedProject !== null && (project.id !== input.expectedProject.id ||
       project.label !== input.expectedProject.label)) {
@@ -515,9 +536,11 @@ function installDomBridge(input: BridgeInput): unknown {
   let documentNonce = '', documentLoaded = false;
   const originalMainHidden = main.hidden;
   const context = () => {
+    const selected = document.querySelector('[data-app-action-sidebar-project-row][aria-current="page"]');
+    const projectMatches = selected instanceof HTMLElement && selected.dataset.appActionSidebarProjectId === project.id && selected.dataset.appActionSidebarProjectLabel === project.label;
     const taskRow = document.querySelector('[data-app-action-sidebar-thread-row][data-app-action-sidebar-thread-selected="true"], [data-app-action-sidebar-thread-row][aria-current="page"]');
     const task =
-      taskRow instanceof HTMLElement &&
+      projectMatches && taskRow instanceof HTMLElement &&
       typeof taskRow.dataset.appActionSidebarThreadId === 'string' &&
       typeof taskRow.dataset.appActionSidebarThreadTitle === 'string'
         ? { id: taskRow.dataset.appActionSidebarThreadId,
@@ -525,7 +548,7 @@ function installDomBridge(input: BridgeInput): unknown {
     const classes = document.documentElement.classList;
     const theme = classes.contains('electron-dark') ? 'dark' :
       classes.contains('electron-light') ? 'light' : 'system';
-    return { projectPath: input.projectPath, task, theme };
+    return { projectPath: projectMatches ? input.projectPath : null, task, theme };
   };
   const publishContext = () => {
     const next = context();
@@ -544,6 +567,7 @@ function installDomBridge(input: BridgeInput): unknown {
     notify({ kind: 'surface', open: false });
   };
   const open = () => {
+    if (entry.disabled) return;
     restore();
     host = document.createElement('main');
     host.dataset.codexGitSurface = '';
@@ -580,13 +604,17 @@ function installDomBridge(input: BridgeInput): unknown {
   const observer = new MutationObserver(() => {
     const currentProject = document.querySelector('[data-app-action-sidebar-project-row][aria-current="page"]');
     if (!sidebar.isConnected || !main.isConnected || !entry.isConnected ||
-        (entryHost !== null && !entryHost.isConnected) ||
-        !(currentProject instanceof HTMLElement) ||
-        currentProject.dataset.appActionSidebarProjectId !== project.id ||
-        currentProject.dataset.appActionSidebarProjectLabel !== project.label) {
+        (entryHost !== null && !entryHost.isConnected)) {
       notify({ kind: 'standalone-required' });
       return;
     }
+    // Native task pages need not mark a project row as selected. Keep the
+    // launcher's repository binding, but never attribute an unproven task.
+    const differentProject = currentProject instanceof HTMLElement &&
+      (currentProject.dataset.appActionSidebarProjectId !== project.id ||
+       currentProject.dataset.appActionSidebarProjectLabel !== project.label);
+    if (entry.disabled !== differentProject) entry.disabled = differentProject;
+    if (differentProject && host !== null) restore();
     publishContext();
   });
   const close = () => {

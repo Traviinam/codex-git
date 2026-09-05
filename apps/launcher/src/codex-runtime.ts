@@ -71,9 +71,13 @@ export async function startCodexRuntime(
         const attachedConnection = connection;
         const dedicatedInstance = instance;
         connection = null;
-        instance = null;
-        await attachedConnection?.close().catch(() => undefined);
-        await dedicatedInstance?.close();
+        try {
+          await attachedConnection?.close();
+        } catch {
+          // Terminate only when native state/CSP could not be restored safely.
+          instance = null;
+          await dedicatedInstance?.close();
+        }
       });
     }
   } catch {

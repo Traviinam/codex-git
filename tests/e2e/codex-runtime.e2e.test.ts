@@ -46,6 +46,24 @@ describe('Codex runtime composition', () => {
     expect(instance.closed).toBe(true);
   });
 
+  it('preserves the dedicated window after a safely cleaned-up fallback until explicit shutdown', async () => {
+    const instance = new FixtureInstance(ownedTarget);
+    const renderer = new FailingRenderer();
+    renderer.close = async () => undefined;
+    const runtime = await startCodexRuntime({
+      connectRenderer: async () => renderer,
+      launchInstance: async () => instance,
+      projectPath: '/Users/example/codex-git',
+      surfacePort: 0,
+    });
+    runtimes.push(runtime);
+    renderer.publishStandalone();
+    await vi.waitFor(() => expect(runtime.currentHost()).toBe('standalone'));
+    expect(instance.closed).toBe(false);
+    await runtime.close();
+    expect(instance.closed).toBe(true);
+  });
+
   it('closes the dedicated instance when renderer teardown fails during fallback', async () => {
     const instance = new FixtureInstance(ownedTarget);
     const renderer = new FailingRenderer();
