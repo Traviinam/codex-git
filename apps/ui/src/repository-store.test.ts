@@ -1,4 +1,9 @@
-import { fileIdSchema, operationIdSchema } from '@codex-git/protocol';
+import {
+  fileIdSchema,
+  operationIdSchema,
+  worktreeIdSchema,
+  worktreeGenerationSchema,
+} from '@codex-git/protocol';
 import { describe, expect, it, vi } from 'vitest';
 
 import { createOverviewFixture } from './overview-fixtures.js';
@@ -6,6 +11,55 @@ import type { RepositoryOverviewSource } from './repository-overview-model.js';
 import { createRepositoryStore } from './repository-store.js';
 
 describe('RepositoryStore lifecycle', () => {
+  it('keeps inspecting an unavailable path across renewed opaque identities', () => {
+    const fixture = createOverviewFixture('unavailable-worktree');
+    const current = fixture.source.getSnapshot();
+    if (current.kind !== 'repository') throw new Error('Expected Repository');
+    const missing = current.snapshot.worktrees.find(
+      (w) => w.status.kind === 'unavailable',
+    )!;
+    const store = createRepositoryStore(fixture.source);
+    store.selectWorktree(missing.worktreeId);
+    const renewed = {
+      ...missing,
+      worktreeId: worktreeIdSchema.parse(
+        'worktree_11111111111111111111111111111111',
+      ),
+      generation: worktreeGenerationSchema.parse(
+        'generation_11111111111111111111111111111111',
+      ),
+    };
+    const publish = (replacement: typeof missing) =>
+      fixture.publish({
+        ...current,
+        snapshot: {
+          ...current.snapshot,
+          worktrees: current.snapshot.worktrees.map((w) =>
+            w === missing ? replacement : w,
+          ),
+        },
+      });
+    publish(renewed);
+    expect(store.getSnapshot().selectedWorktreeId).toBe(renewed.worktreeId);
+    expect(store.getSnapshot().focusRecoveryRevision).toBe(0);
+    expect(store.getSnapshot().selectedFileId).toBeNull();
+    publish({
+      ...renewed,
+      status: { kind: 'clean' },
+      availability: { kind: 'available' },
+      worktreeId: worktreeIdSchema.parse(
+        'worktree_22222222222222222222222222222222',
+      ),
+      generation: worktreeGenerationSchema.parse(
+        'generation_22222222222222222222222222222222',
+      ),
+    });
+    expect(store.getSnapshot().selectedWorktreeId).toBe(
+      current.snapshot.worktrees[0]!.worktreeId,
+    );
+    store.dispose();
+  });
+
   it('waits for the backend draft revision before persisting text typed during initial load', async () => {
     const fixture = createOverviewFixture('changed-worktree');
     const current = fixture.source.getSnapshot();

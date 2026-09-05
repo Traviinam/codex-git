@@ -162,10 +162,18 @@ export function createRepositoryStore(
     const branchChanged =
       selected !== null && headSelectionKey(selected) !== selectedHeadKey;
 
+    const inspectionReplacement = identityChanged
+      ? refreshedUnavailableInspection(
+          sourceState,
+          nextSource,
+          selectedWorktreeId,
+        )
+      : undefined;
     sourceState = nextSource;
     loadVisibleDrafts(nextSource);
     if (identityChanged) {
-      const replacement = selectInitialWorktree(nextSource);
+      const replacement =
+        inspectionReplacement ?? selectInitialWorktree(nextSource);
       const previousSelection = selectedWorktreeId;
       selectedWorktreeId = replacement?.worktreeId ?? null;
       selectedGeneration = replacement?.generation ?? null;
@@ -173,12 +181,13 @@ export function createRepositoryStore(
       selectedFileId = null;
       clearDiff();
       selectionNotice =
-        previousSelection === null
+        previousSelection === null || inspectionReplacement !== undefined
           ? null
           : replacement === undefined
             ? 'The selected Worktree is no longer available.'
             : `The selected Worktree changed. ${replacement.displayName} is now selected.`;
-      if (previousSelection !== null) focusRecoveryRevision += 1;
+      if (previousSelection !== null && inspectionReplacement === undefined)
+        focusRecoveryRevision += 1;
       closeBranches();
     } else if (branchChanged) {
       selectedHeadKey = headSelectionKey(selected);
@@ -823,6 +832,33 @@ export function createRepositoryStore(
       queueDraftWrite(worktreeId);
     }
   }
+}
+
+// Preserve only the inspection location, never an opaque operation identity.
+function refreshedUnavailableInspection(
+  previous: RepositoryOverviewSourceState,
+  next: RepositoryOverviewSourceState,
+  selectedId: WorktreeId | null,
+): WorktreeOverviewSnapshot | undefined {
+  if (
+    previous.kind !== 'repository' ||
+    next.kind !== 'repository' ||
+    previous.snapshot.repositoryId !== next.snapshot.repositoryId
+  )
+    return undefined;
+  const prior = findWorktree(previous, selectedId);
+  const unavailable = (worktree: WorktreeOverviewSnapshot) =>
+    worktree.availability === undefined
+      ? worktree.status.kind === 'unavailable'
+      : worktree.availability.kind === 'unavailable';
+  if (prior === null || !unavailable(prior)) return undefined;
+  const candidates = next.snapshot.worktrees.filter(
+    (worktree) =>
+      worktree.path === prior.path &&
+      worktree.role === prior.role &&
+      unavailable(worktree),
+  );
+  return candidates.length === 1 ? candidates[0] : undefined;
 }
 
 function findWorktree(

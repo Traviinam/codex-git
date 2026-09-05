@@ -564,6 +564,7 @@ function installDomBridge(input: BridgeInput): unknown {
   const restore = () => {
     frame = null; documentNonce = ''; documentLoaded = false; host?.remove(); host = null; main.hidden = originalMainHidden;
     entry.removeAttribute('aria-current');
+    entry.style.removeProperty('background-color');
     notify({ kind: 'surface', open: false });
   };
   const open = () => {
@@ -583,6 +584,7 @@ function installDomBridge(input: BridgeInput): unknown {
     host.append(frame);
     main.after(host);
     main.hidden = true; entry.setAttribute('aria-current', 'page');
+    entry.style.backgroundColor = 'var(--color-primary-ghost-hover, rgba(127, 127, 127, 0.18))';
     notify({ kind: 'surface', open: true });
   };
   const handleSidebar = (event: Event) => {

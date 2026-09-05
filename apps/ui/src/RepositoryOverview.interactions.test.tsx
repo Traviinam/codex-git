@@ -3,7 +3,12 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { operationIdSchema, refIdSchema } from '@codex-git/protocol';
+import {
+  operationIdSchema,
+  refIdSchema,
+  worktreeIdSchema,
+  worktreeGenerationSchema,
+} from '@codex-git/protocol';
 
 import { App } from './overview.js';
 import { createOverviewFixture } from './overview-fixtures.js';
@@ -23,6 +28,65 @@ describe('Repository overview interactions', () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+  });
+
+  it('preserves row and search focus across renewed unavailable identities', () => {
+    const fixture = createOverviewFixture('unavailable-worktree');
+    const store = createRepositoryStore(fixture.source);
+    act(() => root.render(<App store={store} />));
+    const missing = button(
+      'Select missing-worktree Worktree at /private/tmp/missing-worktree',
+    );
+    act(() => missing.click());
+    missing.focus();
+    const source = fixture.source.getSnapshot();
+    if (source.kind !== 'repository') throw new Error('Expected Repository');
+    const renew = (digit: string) =>
+      act(() =>
+        fixture.publish({
+          ...source,
+          snapshot: {
+            ...source.snapshot,
+            worktrees: source.snapshot.worktrees.map((w) =>
+              w.status.kind !== 'unavailable'
+                ? w
+                : {
+                    ...w,
+                    worktreeId: worktreeIdSchema.parse(
+                      `worktree_${digit.repeat(32)}`,
+                    ),
+                    generation: worktreeGenerationSchema.parse(
+                      `generation_${digit.repeat(32)}`,
+                    ),
+                  },
+            ),
+          },
+        }),
+      );
+    renew('a');
+    expect(document.activeElement).toBe(
+      button(
+        'Select missing-worktree Worktree at /private/tmp/missing-worktree',
+      ),
+    );
+    act(() =>
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Home', bubbles: true }),
+      ),
+    );
+    expect(store.getSnapshot().selectedWorktreeId).toBe(
+      source.snapshot.worktrees[0]!.worktreeId,
+    );
+    act(() => missing.click());
+    const search = container.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    )!;
+    search.focus();
+    renew('b');
+    expect(document.activeElement).toBe(search);
+    expect(store.getSnapshot().selectedWorktreeId).toBe(
+      worktreeIdSchema.parse(`worktree_${'b'.repeat(32)}`),
+    );
   });
 
   it('confirms the exact Remote and same-name target before Publish', async () => {

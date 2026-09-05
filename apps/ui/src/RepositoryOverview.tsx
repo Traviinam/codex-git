@@ -284,7 +284,22 @@ export function RepositoryOverview({
             </label>
             <ul>
               {visibleWorktrees.map((worktree) => (
-                <li key={worktree.worktreeId}>
+                <li
+                  key={
+                    (
+                      worktree.availability === undefined
+                        ? worktree.status.kind === 'unavailable'
+                        : worktree.availability.kind === 'unavailable'
+                    )
+                      ? JSON.stringify([
+                          snapshot.repositoryId,
+                          worktree.role,
+                          worktree.path,
+                          'unavailable',
+                        ])
+                      : worktree.worktreeId
+                  }
+                >
                   <button
                     aria-current={
                       worktree.worktreeId === state.selectedWorktreeId

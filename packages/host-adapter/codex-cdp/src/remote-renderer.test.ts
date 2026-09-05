@@ -141,6 +141,15 @@ describe('dedicated Codex remote renderer', () => {
     expect(
       dom.window.document.querySelectorAll('[data-codex-git-sidebar-entry]'),
     ).toHaveLength(1);
+    const gitEntry = dom.window.document.querySelector<HTMLButtonElement>(
+      '[data-codex-git-sidebar-entry]',
+    )!;
+    gitEntry.click();
+    expect(gitEntry.getAttribute('aria-current')).toBe('page');
+    expect(gitEntry.style.backgroundColor).not.toBe('');
+    await connection.perform({ kind: 'restore-native-surface' });
+    expect(gitEntry.hasAttribute('aria-current')).toBe(false);
+    expect(gitEntry.style.backgroundColor).toBe('');
     const projectRow = dom.window.document.querySelector(
       '[data-app-action-sidebar-project-row]',
     )!;
