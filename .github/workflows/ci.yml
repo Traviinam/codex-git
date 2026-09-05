@@ -60,7 +60,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 20
     env:
-      CODEX_DESKTOP_VERSION: 26.820.60940 (build 7119)
+      CODEX_DESKTOP_VERSION: 26.901.41600 (build 7982)
       CODEX_GIT_REFERENCE_PROFILE: github-actions-macos-15
     steps:
       - name: Check out repository

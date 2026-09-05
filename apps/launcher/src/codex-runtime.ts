@@ -45,7 +45,12 @@ export async function startCodexRuntime(
       options.dedicatedInstance,
     );
     const result = await new DedicatedCodexHostAdapter({
-      connectRenderer: options.connectRenderer ?? connectDedicatedCodexRenderer,
+      connectRenderer:
+        options.connectRenderer ??
+        ((request) =>
+          connectDedicatedCodexRenderer(request, {
+            loadDocument: () => standalone.loadEmbeddedDocument(),
+          })),
       instance,
       projectPath: options.projectPath,
     }).attach({
@@ -67,10 +72,8 @@ export async function startCodexRuntime(
         const dedicatedInstance = instance;
         connection = null;
         instance = null;
-        await Promise.allSettled([
-          attachedConnection?.close(),
-          dedicatedInstance?.close(),
-        ]);
+        await attachedConnection?.close().catch(() => undefined);
+        await dedicatedInstance?.close();
       });
     }
   } catch {
@@ -82,18 +85,21 @@ export async function startCodexRuntime(
     healthUrl: standalone.healthUrl,
     sessionUrl: standalone.sessionUrl,
     surfaceUrl: standalone.surfaceUrl,
+    loadEmbeddedDocument: () => standalone.loadEmbeddedDocument(),
     currentHost: () => host,
     async close() {
       if (closing) {
         return;
       }
       closing = true;
-      const results = await Promise.allSettled([
-        connection?.close(),
-        instance?.close(),
-        monitor,
-        standalone.close(),
-      ]);
+      const results = await Promise.allSettled([connection?.close()]);
+      results.push(
+        ...(await Promise.allSettled([
+          instance?.close(),
+          monitor,
+          standalone.close(),
+        ])),
+      );
       const failure = results.find(
         (result): result is PromiseRejectedResult =>
           result.status === 'rejected',

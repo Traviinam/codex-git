@@ -17,6 +17,7 @@ export function findCompatibleCodexAnchors(
   );
   if (
     profile === null ||
+    profile.documentInjection === true ||
     renderer.ownership !== 'codex-git-dedicated' ||
     renderer.id.length === 0
   ) {

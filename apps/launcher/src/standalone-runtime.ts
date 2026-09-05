@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { lstat, realpath } from 'node:fs/promises';
+import { lstat, realpath, readFile } from 'node:fs/promises';
 import type { Server } from 'node:http';
 import { isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +23,7 @@ import { startLoopbackServer, type LoopbackServer } from '@codex-git/server';
 import { StandaloneHostAdapter } from '@codex-git/host-adapter-standalone';
 import { createServer as createViteServer, type ViteDevServer } from 'vite';
 
+import { embeddedAssetsPlugin } from './embedded-assets.js';
 import { protocolBootstrapPlugin } from './protocol-bootstrap.js';
 import { toProtocolRepositorySnapshot } from './repository-protocol-adapter.js';
 
@@ -43,6 +44,7 @@ export interface StandaloneRuntime {
   readonly healthUrl: URL;
   readonly sessionUrl: URL;
   readonly surfaceUrl: URL;
+  loadEmbeddedDocument(): Promise<string>;
   close(): Promise<void>;
 }
 
@@ -119,12 +121,14 @@ export async function startStandaloneRuntime(
     surfaceServer = await createViteServer({
       configFile: uiConfigPath,
       plugins: [
+        embeddedAssetsPlugin(),
         protocolBootstrapPlugin(protocolServer.sessionUrl, options.projectPath),
       ],
       server: {
         host: loopbackHost,
         port: options.surfacePort ?? 5173,
         strictPort: true,
+        cors: false,
       },
     });
     await surfaceServer.listen();
@@ -143,6 +147,18 @@ export async function startStandaloneRuntime(
       healthUrl: protocolServer.healthUrl,
       sessionUrl: protocolServer.sessionUrl,
       surfaceUrl,
+      async loadEmbeddedDocument() {
+        if (closed) throw new Error('The surface is closed.');
+        const source = await readFile(
+          new URL('../../ui/index.html', import.meta.url),
+          'utf8',
+        );
+        const html = await surfaceServer!.transformIndexHtml(
+          surfaceUrl.href,
+          source,
+        );
+        return html.replace('<head>', `<head><base href="${surfaceUrl.href}">`);
+      },
       async close() {
         if (closed) {
           return;

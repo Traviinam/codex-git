@@ -19,12 +19,19 @@ source must provide a non-empty stable target ID and the exact
 `codex-git-dedicated` ownership proof before the compatibility probe can mutate
 the document.
 
-Codex Desktop's Content Security Policy does not allow the loopback Git Surface
-as a frame. The dedicated renderer therefore grants a generation-scoped
-`Page.setBypassCSP` lease before mounting. The lease is released after any
-replacement, failed attachment, or connection close. Never grant this lease to
-a normal user-owned Codex window: bypassing CSP expands the effect of any script
-already executing in that renderer.
+Codex Desktop's Content Security Policy blocks direct loopback frame navigation.
+Build `7982` uses a sandboxed `about:blank` frame instead. The launcher supplies
+HTML directly from its own Vite transform pipeline, including its protocol
+bootstrap. CDP writes that document into the identified blank child frame using
+`Page.setDocumentContent`; the renderer never supplies a document URL or HTML.
+Static module requests permit the frame's opaque `null` Origin. Git protocol
+requests still require the instance token and protocol version.
+
+A generation-scoped `Page.setBypassCSP` lease remains limited to the dedicated
+renderer. A nonce and frame-source check acknowledge document readiness; missing
+readiness, navigation away from the blank frame, or document loading failure
+causes standalone fallback. The lease is released on close or failed attachment.
+Never grant this lease to a normal user-owned Codex window.
 
 CDP has no application-level authentication in this design. Treat access to the
 dedicated loopback debugging endpoint as trusted local-process authority. Do not
@@ -33,9 +40,10 @@ endpoint, or record it in ordinary logs.
 
 ## Tested profile
 
-| Codex Desktop                 | Chromium framework | Required anchors                                                | Evidence                                                                 |
-| ----------------------------- | ------------------ | --------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `26.820.60940` (build `7119`) | `151.0.7922.170`   | `#app-shell-sidebar`; `[data-app-shell-main-surface="default"]` | Installed renderer bundle inspection plus automated DOM fixture coverage |
+| Codex Desktop                 | Chromium framework | Frame loading                                | Evidence                                                                           |
+| ----------------------------- | ------------------ | -------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `26.901.41600` (build `7982`) | `152.0.7977.64`    | Launcher document into sandboxed blank frame | Automated tests and local adapter smoke; VoiceOver/keyboard release record pending |
+| `26.820.60940` (build `7119`) | `151.0.7922.170`   | Legacy direct frame navigation               | Historical fixture and renderer inspection; not the current release reference      |
 
 The automated exact-profile matrix covers read-only probing, fail-closed fallback,
 transactional attachment, one-entry mounting, native navigation, repeat
@@ -49,13 +57,14 @@ matrix; do not widen selectors to make an unknown build appear compatible.
 
 ## Manual smoke matrix
 
-This matrix passed on 2026-08-29 against a disposable dedicated profile using
-Codex Desktop `26.820.60940` (build `7119`) and Chromium `151.0.7922.170`.
-Builds `6962` and `7377` are intentionally excluded: live validation showed
-their `app://` Content Security Policy blocks the loopback Git Surface frame
-even after the scoped CDP bypass command. Build `7377` also reports Chromium
-`151.0.7922.174`, outside the tested framework version. Unsupported builds must
-use the standalone surface.
+The release reference is build `7982`. Automated local smoke confirms a visible
+Git entry, document loading, Stage/Unstage against a disposable Index, repeated
+opening, renderer reload, and native restoration. The durable human release
+checks remain pending until the VoiceOver wizard is completed.
+
+Builds `6962` and `7377` remain excluded. Direct HTTP iframe navigation also failed
+on `7982`; that failure led to the document-loading path rather than removal of
+sandbox restrictions. See the [probe and integration record](../release/evidence/build-7982-compatibility.md).
 
 The human portion of the matrix is intentionally limited to behavior that
 requires an actual Codex/macOS session. The release wizard records these checks:

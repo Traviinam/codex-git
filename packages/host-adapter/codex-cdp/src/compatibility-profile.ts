@@ -1,4 +1,5 @@
 export interface CodexCompatibilityProfile {
+  readonly documentInjection?: boolean;
   readonly build: string;
   readonly chromiumProduct: string;
   readonly entryInsertionSelector: string | null;
@@ -9,6 +10,17 @@ export interface CodexCompatibilityProfile {
 }
 
 const profiles = [
+  {
+    build: '7982',
+    version: '26.901.41600',
+    chromiumProduct: 'Chrome/152.0.7977.64',
+    documentInjection: true,
+    entryInsertionSelector:
+      'div.flex-col:has(> button.sidebar-item[aria-haspopup="menu"])',
+    mainSurfaceSelector: '[data-app-shell-main-surface="default"]',
+    nativeEntrySelector: 'button.sidebar-item[aria-haspopup="menu"]',
+    sidebarSelector: '#app-shell-sidebar',
+  },
   {
     build: '7119',
     chromiumProduct: 'Chrome/151.0.7922.170',

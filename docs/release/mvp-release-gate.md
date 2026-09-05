@@ -59,11 +59,11 @@ External-change timing starts before the filesystem write and ends only after
 SSE-triggered refresh makes the new Changed File visible in the DOM.
 
 The approved CI reference profile is `github-actions-macos-15`, paired with the
-tested Codex compatibility profile `26.820.60940 (build 7119)`. The JSON and
+tested Codex compatibility profile `26.901.41600 (build 7982)`. The JSON and
 Markdown artifacts record the actual CPU, architecture, memory, macOS, Git,
 Node.js, reference profile, and Codex compatibility version. A local release
 run must explicitly set `CODEX_GIT_REFERENCE_PROFILE=local-macos-release` and
-`CODEX_DESKTOP_VERSION='26.820.60940 (build 7119)'`; an unapproved platform,
+`CODEX_DESKTOP_VERSION='26.901.41600 (build 7982)'`; an unapproved platform,
 profile, or missing/mismatched Codex version fails AC-24.
 
 ## VoiceOver and keyboard smoke record

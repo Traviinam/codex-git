@@ -12,7 +12,7 @@ describe('release environment evidence', () => {
   it('records the required hardware, macOS, Git, Node, and Codex versions', async () => {
     const environment = await collectReleaseEnvironment({
       architecture: 'arm64',
-      codexVersion: '26.820.60940 (build 7119)',
+      codexVersion: '26.901.41600 (build 7982)',
       cpu: 'Apple Test CPU',
       memoryBytes: 16 * 1_024 ** 3,
       nodeVersion: 'v22.12.0',
@@ -30,7 +30,7 @@ describe('release environment evidence', () => {
 
     expect(environment).toEqual({
       architecture: 'arm64',
-      codex: '26.820.60940 (build 7119)',
+      codex: '26.901.41600 (build 7982)',
       cpu: 'Apple Test CPU',
       git: 'git version 2.50.1',
       memoryBytes: 16 * 1_024 ** 3,

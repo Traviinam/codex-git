@@ -84,6 +84,17 @@ describe('dedicated Codex remote renderer', () => {
     expect(session.closed).toBe(true);
   });
 
+  it('rejects document injection without a launcher-owned loader before CDP', async () => {
+    const session = new FixtureCdpSession({ status: 'attached' });
+    await expect(
+      connectDedicatedCodexRenderer(
+        { ...request, build: '7982', version: '26.901.41600' },
+        { connect: async () => session },
+      ),
+    ).rejects.toThrow('document loader');
+    expect(session.commands).toEqual([]);
+  });
+
   it('rejects an unverified Chromium build before changing CSP', async () => {
     const session = new FixtureCdpSession(
       { status: 'not-ready' },
@@ -100,21 +111,24 @@ describe('dedicated Codex remote renderer', () => {
     ]);
   });
 
-  it('rejects build 6962 before CDP because its live CSP blocks the surface frame', async () => {
-    const session = new FixtureCdpSession({
-      context: expectedContext,
-      project: { id: 'project-42', label: 'codex-git' },
-      status: 'attached',
-    });
+  it.each([{ build: '6962', version: '26.818.41509' }])(
+    'rejects build $build before CDP because its live CSP blocks the surface frame',
+    async (profile) => {
+      const session = new FixtureCdpSession({
+        context: expectedContext,
+        project: { id: 'project-42', label: 'codex-git' },
+        status: 'attached',
+      });
 
-    await expect(
-      connectDedicatedCodexRenderer(
-        { ...request, build: '6962', version: '26.818.41509' },
-        { connect: async () => session },
-      ),
-    ).rejects.toThrow('Unsupported Codex Desktop version');
-    expect(session.commands).toEqual([]);
-  });
+      await expect(
+        connectDedicatedCodexRenderer(
+          { ...request, ...profile },
+          { connect: async () => session },
+        ),
+      ).rejects.toThrow('Unsupported Codex Desktop version');
+      expect(session.commands).toEqual([]);
+    },
+  );
 
   it('rejects a version and build from different tested profiles before CDP', async () => {
     const session = new FixtureCdpSession({ status: 'attached' });

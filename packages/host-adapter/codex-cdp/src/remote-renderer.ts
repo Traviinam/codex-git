@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { loadFrameDocument } from './frame-document.js';
 
 import type {
   HostContext,
@@ -25,6 +26,7 @@ import type {
 import type { CspBypassLease } from './renderer.js';
 
 export interface ConnectDedicatedCodexRendererOptions {
+  readonly loadDocument?: () => Promise<string>;
   readonly connect?: (url: string) => Promise<CdpSession>;
   readonly createBindingName?: () => string;
   readonly wait?: (milliseconds: number) => Promise<void>;
@@ -37,6 +39,9 @@ export async function connectDedicatedCodexRenderer(
   const profile = findCodexCompatibilityProfile(request.version, request.build);
   if (profile === null) {
     throw new Error('Unsupported Codex Desktop version');
+  }
+  if (profile.documentInjection && options.loadDocument === undefined) {
+    throw new Error('The embedded document loader is unavailable');
   }
   const session = await (options.connect ?? connectCdpSession)(
     request.target.webSocketUrl,
@@ -83,6 +88,7 @@ export async function connectDedicatedCodexRenderer(
       profile,
       bindingName,
       installation,
+      options.loadDocument,
     );
     lease = null;
     return connection;
@@ -124,11 +130,13 @@ class RemoteDedicatedRendererConnection implements DedicatedRendererConnection {
     private readonly profile: CodexCompatibilityProfile,
     private readonly bindingName: string,
     installation: AttachedInstallation,
+    private readonly loadDocument?: () => Promise<string>,
   ) {
     this.context = installation.context;
     this.open = installation.open;
     this.project = installation.project;
     this.unsubscribe = session.subscribe(this.handleCdpEvent);
+    if (this.open) this.queueDocument();
   }
 
   currentContext(): HostContext {
@@ -189,6 +197,7 @@ class RemoteDedicatedRendererConnection implements DedicatedRendererConnection {
         this.listeners.forEach((listener) => listener(message));
       } else if (message?.kind === 'surface') {
         this.open = message.open;
+        if (this.open) this.queueDocument();
       } else if (message?.kind === 'standalone-required') {
         this.listeners.forEach((listener) => listener(message));
       }
@@ -206,6 +215,26 @@ class RemoteDedicatedRendererConnection implements DedicatedRendererConnection {
     }
   };
 
+  private queueDocument(): void {
+    if (!this.profile.documentInjection || this.loadDocument === undefined)
+      return;
+    this.refresh = this.refresh.then(async () => {
+      if (this.closed) return;
+      try {
+        await loadFrameDocument(
+          this.session,
+          this.loadDocument!,
+          () => this.closed,
+        );
+      } catch {
+        if (!this.closed)
+          this.listeners.forEach((listener) =>
+            listener({ kind: 'standalone-required' }),
+          );
+      }
+    });
+  }
+
   private async reinstall(reopen: boolean): Promise<void> {
     if (this.closed) {
       return;
@@ -215,7 +244,7 @@ class RemoteDedicatedRendererConnection implements DedicatedRendererConnection {
       expectedProject: this.project,
       openSurface: reopen,
     };
-    for (let attempt = 0; attempt < 20; attempt++) {
+    for (let attempt = 0; attempt < 150; attempt++) {
       try {
         await this.session.send('Page.setBypassCSP', { enabled: true });
         const installation = await install(
@@ -228,6 +257,7 @@ class RemoteDedicatedRendererConnection implements DedicatedRendererConnection {
         if (installation.status === 'attached') {
           this.context = installation.context;
           this.open = installation.open;
+          if (this.open) this.queueDocument();
           this.listeners.forEach((listener) =>
             listener({ kind: 'context', context: this.context }),
           );
@@ -271,6 +301,7 @@ async function install(
 ): Promise<Installation> {
   const input: BridgeInput = {
     bindingName,
+    documentInjection: profile.documentInjection === true,
     entryInsertionSelector: profile.entryInsertionSelector,
     expectedProject: request.expectedProject,
     generation,
@@ -419,6 +450,7 @@ function wait(milliseconds: number): Promise<void> {
 }
 
 interface BridgeInput {
+  readonly documentInjection: boolean;
   readonly bindingName: string;
   readonly entryInsertionSelector: string | null;
   readonly expectedProject: DedicatedProjectIdentity | null;
@@ -435,7 +467,7 @@ interface BridgeInput {
 // Kept self-contained because CDP serializes this function into the renderer.
 // prettier-ignore
 function installDomBridge(input: BridgeInput): unknown {
-  const root = globalThis as typeof globalThis & { __codexGitBridge?: { close(): void; restore(): void } };
+  const root = globalThis as typeof globalThis & { __codexGitBridge?: { close(): void; restore(): void; frameName(): string | null; expectDocument(name: string, nonce: string): void; documentReady(name: string): boolean } };
   root.__codexGitBridge?.close();
   const sidebars = document.querySelectorAll(input.sidebarSelector);
   const mainSurfaces = document.querySelectorAll(input.mainSurfaceSelector);
@@ -480,6 +512,8 @@ function installDomBridge(input: BridgeInput): unknown {
   let host: HTMLElement | null = null;
   let frame: HTMLIFrameElement | null = null;
   let capability = '', challenge = '', lastContext = '';
+  let documentNonce = '', documentLoaded = false;
+  const originalMainHidden = main.hidden;
   const context = () => {
     const taskRow = document.querySelector('[data-app-action-sidebar-thread-row][data-app-action-sidebar-thread-selected="true"], [data-app-action-sidebar-thread-row][aria-current="page"]');
     const task =
@@ -505,7 +539,7 @@ function installDomBridge(input: BridgeInput): unknown {
     }, '*');
   };
   const restore = () => {
-    frame = null; host?.remove(); host = null; main.hidden = false;
+    frame = null; documentNonce = ''; documentLoaded = false; host?.remove(); host = null; main.hidden = originalMainHidden;
     entry.removeAttribute('aria-current');
     notify({ kind: 'surface', open: false });
   };
@@ -516,7 +550,8 @@ function installDomBridge(input: BridgeInput): unknown {
     host.setAttribute('aria-label', input.surfaceTitle);
     host.style.cssText = 'display:flex;flex:1 1 auto;min-height:0;min-width:0;overflow:hidden';
     frame = document.createElement('iframe');
-    frame.src = input.surfaceUrl; frame.title = input.surfaceTitle;
+    frame.name = `codex-git-${secret()}`;
+    frame.src = input.documentInjection ? 'about:blank' : input.surfaceUrl; frame.title = input.surfaceTitle;
     frame.setAttribute('sandbox', 'allow-scripts');
     Object.assign(frame.style, { border: '0', height: '100%', width: '100%' });
     capability = secret(); challenge = secret();
@@ -535,6 +570,7 @@ function installDomBridge(input: BridgeInput): unknown {
     if (frame === null || event.source !== frame.contentWindow ||
         typeof value !== 'object' || value === null) return;
     const message = value as Record<string, unknown>;
+    if (message.type === 'codex-git:document-ready' && documentNonce !== '' && message.nonce === documentNonce) { documentLoaded = true; publishContext(); return; }
     const action = message.action;
     if (message.type === 'codex-git:host-action' && message.capability === capability &&
         message.challenge === challenge && message.generation === input.generation &&
@@ -559,7 +595,11 @@ function installDomBridge(input: BridgeInput): unknown {
     (entryHost ?? entry).remove();
     delete root.__codexGitBridge;
   };
-  root.__codexGitBridge = { close, restore };
+  root.__codexGitBridge = { close, restore,
+    frameName: () => frame?.name ?? null,
+    expectDocument: (name, nonce) => { if (frame?.name === name) { documentNonce = nonce; documentLoaded = false; } },
+    documentReady: (name) => frame?.name === name && documentLoaded,
+  };
   entry.addEventListener('click', open);
   sidebar.addEventListener('click', handleSidebar, true);
   globalThis.addEventListener('message', handleMessage);
